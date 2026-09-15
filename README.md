@@ -1,31 +1,29 @@
-# Student infrastructure
+# Project Setup
 
-This folder is the distributable student environment. It provides:
+This folder holds everything you need to run the assignment locally:
 
-- MinIO object storage;
-- PostgreSQL 16 and Adminer;
-- JupyterLab and a pinned Python data-engineering environment;
-- a fixed, network-free QEC dataset bundle;
-- connection helpers, simple stage templates, and basic starter tests;
-- the two-part assignment, source/Silver/ML-table guides, QEC primer, FAQ,
-  rubric, and submission checklist.
+- MinIO (object storage)
+- PostgreSQL 16 + Adminer
+- JupyterLab with all the Python dependencies pre-installed
+- The three QEC datasets, already included — no Kaggle account or API keys needed
+- Connection helpers, starter stage files, and basic tests to build on
 
-Before starting, install Docker and Make and open a **Bash-compatible terminal**.
-On Windows, install Bash through WSL 2 with Ubuntu if needed, and run the
-assignment in the Ubuntu terminal. PowerShell alone does not support the
-supplied commands. Follow the [Windows setup steps](assignment/getting-started.md#windows-use-wsl-bash-not-powershell), including Docker Desktop's WSL integration.
+## Before you start
 
-From this directory, run:
+You need Docker and Make installed, and a Bash-compatible terminal.
 
-```bash
-make bootstrap
-```
+**Windows users:** PowerShell won't work with these commands. Install WSL 2 with Ubuntu, enable Docker Desktop's WSL integration, and run everything from the Ubuntu terminal instead. See the [Windows setup steps](#) for details.
 
-On success, the command prints the three browser addresses. The first run
-downloads container images and therefore takes longer. Use `make help` for
-daily operations, verification, shutdown, and the explicit destructive reset
-command.
+## Getting it running
 
-The student handout starts at `assignment/README.md`; the coding workspace
-starts at `starter/README.md`. The three assignment datasets are already
-included, so students do not need Kaggle or other dataset-service credentials.
+From this folder, run:
+`make bootstrap`
+
+The first run will take a few minutes since it's pulling container images. Once it's done, it'll print out three localhost links (JupyterLab, MinIO, Adminer).
+
+Run `make help` any time to see other commands — checking status, resetting things, shutting down, etc.
+
+## Where to go next
+
+- Assignment instructions: `assignment/README.md`
+- Your actual coding workspace: `starter/README.md`
