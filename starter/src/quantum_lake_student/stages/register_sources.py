@@ -171,6 +171,7 @@ def _code_revision() -> str:
         return "unknown"
 
 
+#this function is used to merge the new payload into the existing JSON file without overwriting the entire file. It reads the existing JSON file, updates it with the new payload under the specified key, and writes it back to the file.
 def _merge_json_file(path: Path, key: str, payload: dict) -> None:
     """Set one top-level key in a shared JSON file without disturbing the rest.
 
@@ -185,6 +186,7 @@ def _merge_json_file(path: Path, key: str, payload: dict) -> None:
     path.write_text(json.dumps(existing, indent=2, sort_keys=True))
 
 
+# this one is the main composition of the bronze stage, it coordinates the whole process of registering and verifying the original source files.
 def run(run_id: str) -> StageResult:
     settings = Settings.from_environment()
     result = StageResult(stage="register_sources", run_id=run_id)
@@ -210,6 +212,7 @@ def run(run_id: str) -> StageResult:
         if len(data) != obj["bytes"]:
             raise BronzeError(f"size mismatch for {object_name}")
 
+        #we check the contents of the zip file to ensure that it does not contain any unsafe members and has thwe right structure
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             members = zf.namelist()
             unsafe = [m for m in members if is_unsafe_member(m)]
