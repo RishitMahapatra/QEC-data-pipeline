@@ -80,7 +80,7 @@ def make_archive(**kwargs) -> zipfile.ZipFile:
 
 
 def build(archive, run_id="test-run"):
-    return prep.build_google_silver(
+    return prep.build_google_table(
         archive, bronze_object="bronze/source=google_qec/x.zip", input_sha256="abc123", run_id=run_id
     )
 
