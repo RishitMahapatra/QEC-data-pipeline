@@ -7,11 +7,12 @@ Three groups of tests:
   and `_check_qasmbench_structure` directly against small in-memory zip
   files, both valid and deliberately broken. These need no platform at all.
 - `_verify_object` unit tests: exercise hash/size verification against a
-  fake manifest entry, both matching and mismatched.
+  fake manifest entry, both matching and mismatched, plus the case where
+  the object is missing from the Bronze inventory entirely.
 - `run()` tests: exercise the full stage end to end, including
   repeatability on unchanged input and that a bad archive actually stops
-  the run. MinIO and the course manifest are faked via monkeypatching so
-  these do not need the live Docker platform.
+  the run. MinIO, `bronze_inventory`, and the course manifest are faked via
+  monkeypatching so these do not need the live Docker platform.
 """
 
 from __future__ import annotations
@@ -181,6 +182,9 @@ def test_check_qasmbench_structure_rejects_bad_data(flaw: str) -> None:
 # ---------------------------------------------------------------------------
 # _verify_object unit tests - hash/size checking against a fake manifest
 # entry, with `_read_object_bytes` monkeypatched so no MinIO call happens.
+# Each entry's path is converted to its Bronze key and placed in a fake
+# `inventory` dict, since _verify_object now confirms the object is present
+# in Bronze before ever trying to fetch it.
 # ---------------------------------------------------------------------------
 
 
@@ -196,8 +200,11 @@ def test_verify_object_accepts_matching_hash_and_size(
         "mandatory": True,
     }
     monkeypatch.setattr(rs, "_read_object_bytes", lambda settings, name: data)
+    inventory = {entry["path"].replace("raw/", "bronze/", 1): 0}
 
-    object_name, returned_data = rs._verify_object(settings=None, manifest_entry=entry)
+    object_name, returned_data = rs._verify_object(
+        settings=None, manifest_entry=entry, inventory=inventory
+    )
 
     assert object_name == "bronze/source=qasmbench/qasmbench-qec.zip"
     assert returned_data == data
@@ -212,9 +219,10 @@ def test_verify_object_rejects_hash_mismatch(monkeypatch: pytest.MonkeyPatch) ->
         "mandatory": True,
     }
     monkeypatch.setattr(rs, "_read_object_bytes", lambda settings, name: b"wrong")
+    inventory = {entry["path"].replace("raw/", "bronze/", 1): 0}
 
     with pytest.raises(rs.BronzeError):
-        rs._verify_object(settings=None, manifest_entry=entry)
+        rs._verify_object(settings=None, manifest_entry=entry, inventory=inventory)
 
 
 def test_verify_object_rejects_size_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,14 +235,29 @@ def test_verify_object_rejects_size_mismatch(monkeypatch: pytest.MonkeyPatch) ->
         "mandatory": True,
     }
     monkeypatch.setattr(rs, "_read_object_bytes", lambda settings, name: data)
+    inventory = {entry["path"].replace("raw/", "bronze/", 1): 0}
 
     with pytest.raises(rs.BronzeError):
-        rs._verify_object(settings=None, manifest_entry=entry)
+        rs._verify_object(settings=None, manifest_entry=entry, inventory=inventory)
+
+
+def test_verify_object_rejects_object_missing_from_inventory() -> None:
+    """A manifest entry whose Bronze key isn't actually present must fail
+    clearly, before any attempt to fetch it from MinIO."""
+    entry = {
+        "source": "qasmbench",
+        "path": "raw/source=qasmbench/qasmbench-qec.zip",
+        "bytes": 5,
+        "sha256": "0" * 64,
+        "mandatory": True,
+    }
+    with pytest.raises(rs.BronzeError):
+        rs._verify_object(settings=None, manifest_entry=entry, inventory={})
 
 
 # ---------------------------------------------------------------------------
-# Full run() tests - MinIO and the manifest are faked via monkeypatch, so
-# these run without the live Docker platform.
+# Full run() tests - MinIO, bronze_inventory, and the manifest are faked via
+# monkeypatch, so these run without the live Docker platform.
 # ---------------------------------------------------------------------------
 
 
@@ -286,6 +309,14 @@ def _patch_platform(
         return zip_bytes_by_object_name[object_name]
 
     monkeypatch.setattr(rs, "_read_object_bytes", _fake_read_object_bytes)
+
+    # run() now calls bronze_inventory(settings) directly to cross-check
+    # each manifest object's presence and to detect unexpected extras, so
+    # this must return exactly the object names this fake release provides.
+    def _fake_bronze_inventory(settings):  # noqa: ARG001 - matches real signature
+        return [(name, 0) for name in zip_bytes_by_object_name]
+
+    monkeypatch.setattr(rs, "bronze_inventory", _fake_bronze_inventory)
 
 
 def test_run_succeeds_and_is_repeatable_on_unchanged_input(
@@ -362,3 +393,33 @@ def test_run_raises_on_structural_flaw(
 
     with pytest.raises(rs.BronzeError):
         rs.run("test-run-flaw")
+
+
+def test_run_reports_unexpected_bronze_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An extra Bronze object the manifest doesn't mandate should be counted
+    as an issue and listed in run.json, without failing the run."""
+    manifest_path, zip_bytes = _stage_fake_manifest(tmp_path)
+    results_root = tmp_path / "results" / "part1"
+    _patch_platform(
+        monkeypatch,
+        manifest_path=manifest_path,
+        zip_bytes_by_object_name=zip_bytes,
+        results_root=results_root,
+    )
+
+    stray_name = "bronze/.DS_Store"
+    zip_bytes[stray_name] = b"stray"
+
+    def _fake_bronze_inventory(settings):  # noqa: ARG001
+        return [(name, 0) for name in zip_bytes]
+
+    monkeypatch.setattr(rs, "bronze_inventory", _fake_bronze_inventory)
+
+    result = rs.run("test-run-unexpected")
+    run_json = json.loads((results_root / "run.json").read_text())
+
+    assert result.output_count == 3
+    assert result.issue_count == 1
+    assert run_json["register_sources"]["unexpected_bronze_objects"] == [stray_name]

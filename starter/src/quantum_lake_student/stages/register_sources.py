@@ -60,7 +60,11 @@ def _bronze_key(manifest_path: str) -> str:
 #adding a hashing function 
 import hashlib #hashlib uses the SHA-256 encryption algo to verify file integrity
 
-from quantum_lake_student.connections import Settings, minio_client # # env config + MinIO client factory
+# ADDED: bronze_inventory lets us cross-check the manifest against what's
+# actually sitting in MinIO, so a genuinely missing object is caught here
+# with a clear error, instead of surfacing later as a confusing MinIO
+# "not found" exception from _read_object_bytes.
+from quantum_lake_student.connections import Settings, minio_client, bronze_inventory # env config + MinIO client factory + inventory listing
 
 
 class BronzeError(RuntimeError):
@@ -76,11 +80,25 @@ def _read_object_bytes(settings: Settings, object_name: str) -> bytes:
     finally:
         resp.close() #closing the HTTP connnection
         resp.release_conn() #returning connection to the HTTP pool to avoid dataleakage
+
+
+# ADDED: cross-checks a manifest entry's path against the real Bronze
+# inventory before we ever try to fetch it, so a missing mandatory object
+# gets one clear BronzeError here rather than a raw MinIO exception later.
+def _bronze_object_name(manifest_path: str, inventory: dict[str, int]) -> str | None:
+    """Map a manifest path to its Bronze key, but only if that key actually exists in Bronze."""
+    candidate = _bronze_key(manifest_path)
+    return candidate if candidate in inventory else None
         
 
-def _verify_object(settings: Settings, manifest_entry: dict) -> tuple[str, bytes]:
+def _verify_object(settings: Settings, manifest_entry: dict, inventory: dict[str, int]) -> tuple[str, bytes]:
     """Fetch one object and confirm its hash and size match the manifest exactly."""
-    object_name = _bronze_key(manifest_entry["path"]) #converting manifest path to real bronze key
+    # ADDED: confirm the object is actually present in Bronze before fetching it,
+    # so a missing mandatory object fails with our own BronzeError, not MinIO's.
+    object_name = _bronze_object_name(manifest_entry["path"], inventory)
+    if object_name is None:
+        raise BronzeError(f"missing mandatory source object: {manifest_entry['path']}")
+
     data = _read_object_bytes(settings, object_name) 
 
     actual_hash = hashlib.sha256(data).hexdigest() #computing the hash download
@@ -257,14 +275,23 @@ def run(run_id: str) -> StageResult:
     settings = Settings.from_environment() #loading connection config from environment variables 
     result = StageResult(stage="register_sources", run_id=run_id) # start tracking this run's outcome
 
+    # ADDED: list what's actually sitting in Bronze right now, so we can both
+    # (a) confirm each mandatory object truly exists before fetching it, and
+    # (b) report any *unexpected* extra object the manifest doesn't mention —
+    # this closes the "report missing or unexpected source objects" line
+    # from the module docstring, which previously only covered "missing".
+    inventory = dict(bronze_inventory(settings))
+
     manifest = _load_manifest() #read the expected-objects manifest
     mandatory_objects = [obj for obj in manifest["objects"] if obj["mandatory"]] # keep only the required ones
     result.input_count = len(mandatory_objects)  # record how many objects we expect to process
 
     registrations: list[dict] = [] #collecting one summary dict per verified object
+    expected_names: set[str] = set()  # ADDED: every Bronze key the manifest says should exist
 
     for obj in mandatory_objects:
-        object_name, data = _verify_object(settings, obj)
+        expected_names.add(_bronze_key(obj["path"]))  # ADDED: track expected key for the unexpected-object diff below
+        object_name, data = _verify_object(settings, obj, inventory)
         members = _check_archive_safety(object_name, data)
 
         #routing to the correct file based on the source name 
@@ -282,8 +309,16 @@ def run(run_id: str) -> StageResult:
             "size_bytes": len(data),
             "member_count": len(members),
         })
+
+    # ADDED: report (but don't fail on) any Bronze object present that the
+    # manifest doesn't mandate — an extra object doesn't corrupt a mandatory
+    # one, so this is a warning rather than a BronzeError.
+    unexpected = sorted(set(inventory) - expected_names)
+    if unexpected:
+        print(f"WARNING: unexpected Bronze objects present: {unexpected}")
+
     result.output_count = len(registrations)  # how many objects were successfully verified
-    result.issue_count = 0  # no rejected objects at this stage
+    result.issue_count = len(unexpected)  # ADDED: unexpected objects counted as issues, not silently ignored
     result.finish()  # mark the finish timestamp on the result
 
     RESULTS_PART1.mkdir(parents=True, exist_ok=True)  # ensure the results folder exists before writing to it
@@ -301,6 +336,7 @@ def run(run_id: str) -> StageResult:
             "input_hashes": {
                 r["source_name"]: r["input_sha256"] for r in registrations
             },
+            "unexpected_bronze_objects": unexpected,  # ADDED: surface exactly what was unexpected, not just the count
         },
     )
 
