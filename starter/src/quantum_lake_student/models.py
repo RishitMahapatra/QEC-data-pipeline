@@ -5,8 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime, timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+    class StrEnum(str, Enum):
+        pass
+
 from typing import Any
 
 

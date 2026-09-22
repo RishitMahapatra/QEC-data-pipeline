@@ -1,6 +1,6 @@
-# Documentation: `verify_bronze_sources.py`
+# Documentation: `register_sources.py`
 
-This document provides a detailed explanation of each function in `verify_bronze_sources.py`, along with its expected behavior and output.
+This document provides a detailed explanation of each function in `register_sources.py`, along with its expected behavior and output.
 
 ---
 
