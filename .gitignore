@@ -10,3 +10,5 @@ venv/
 .DS_Store
 starter/.Trash-0/
 starter/01_discovery.ipynb
+**/discovery_bronze.ipynb
+TASK_SPLIT.md
