@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import re
 import zipfile
@@ -26,8 +25,14 @@ import yaml
 from quantum_lake_student.config import Settings
 from quantum_lake_student.connections import bronze_inventory, minio_client
 from quantum_lake_student.formats import b8_record_bytes, parse_01_records
-from quantum_lake_student.models import Severity, StageResult, stable_record_hash
-from quantum_lake_student.stages.register_sources import RESULTS_PART1, _code_revision
+from quantum_lake_student.models import (
+    RESULTS_PART1,
+    Severity,
+    StageResult,
+    code_revision,
+    merge_json_file,
+    stable_record_hash,
+)
 
 # ---------------------------------------------------------------------------
 # google_qec Silver: experiment.parquet and shot.parquet
@@ -442,13 +447,6 @@ def merge_results_parquet(
     _replace_file(path, buffer.getvalue())
 
 
-def _merge_prepare_data_json(path: Path, source: str, payload: dict) -> None:
-    """Set results[prepare_data][source] in a shared JSON file, keeping other sources' entries."""
-    existing = json.loads(path.read_text()) if path.exists() else {}
-    existing.setdefault("prepare_data", {})[source] = payload
-    path.write_text(json.dumps(existing, indent=2, sort_keys=True))
-
-
 def run(run_id: str) -> StageResult:
     """Build the Silver tables. Only google_qec is implemented so far.
 
@@ -482,10 +480,11 @@ def run(run_id: str) -> StageResult:
     result.issue_count = len(silver.issues)
     result.finish()
 
-    _merge_prepare_data_json(
+    merge_json_file(
         RESULTS_PART1 / "row_counts.json",
+        "prepare_data",
         GOOGLE_SOURCE_NAME,
-        {
+        payload={
             "experiment": {
                 "read": silver.experiment.num_rows,
                 "accepted": silver.experiment.num_rows,
@@ -499,12 +498,13 @@ def run(run_id: str) -> StageResult:
             "trace_rows": silver.trace.num_rows,
         },
     )
-    _merge_prepare_data_json(
+    merge_json_file(
         RESULTS_PART1 / "run.json",
+        "prepare_data",
         GOOGLE_SOURCE_NAME,
-        {
+        payload={
             "run_id": run_id,
-            "code_revision": _code_revision(),
+            "code_revision": code_revision(),
             "started_at": result.started_at.isoformat(),
             "finished_at": result.finished_at.isoformat(),
             "input_hashes": {GOOGLE_SOURCE_NAME: input_sha256},

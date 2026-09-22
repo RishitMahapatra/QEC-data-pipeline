@@ -43,12 +43,11 @@ Student responsibilities:
 
 import io #treats the raw bytes file as a normal file so that zipfile can open them without accessing the disk
 import zipfile # for reading the zipfile directly from memory
-import json #for handling the JSON files 
+import json #for handling the JSON files
 import re #request -> for pattern matching for file names and folders
-import subprocess # for asking git which commit produced this run
 from pathlib import Path # convenient, OS-safe file path handling
 
-from quantum_lake_student.models import StageResult
+from quantum_lake_student.models import RESULTS_PART1, StageResult, code_revision, merge_json_file
 
 MANIFEST_PATH = Path("/course-data/metadata/bundle-manifest.json") #the path is where the assignment requires the hash files to be located 
 
@@ -257,41 +256,6 @@ def _check_qasmbench_structure(members: list[str]) -> None:
             f"extra: {sorted(extra) or 'none'}, missing: {sorted(missing) or 'none'}"
         )
         
-#Adding the results path and JSON-merging helper      
-_PROJECT_ROOT = Path(__file__).resolve().parents[3] # walk up from this file's location to the project root
-RESULTS_PART1 = _PROJECT_ROOT / "results" / "part1" #the folder where all Part I evidence files live
-
-
-def _code_revision() -> str:
-    """Best-effort git commit hash for the code that produced this run.
-
-    Falls back to "unknown" outside a git checkout instead of failing the
-    stage - Bronze registration should not depend on git being available.
-    """
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return completed.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return "unknown"
-
-
-def _merge_json_file(path: Path, key: str, payload: dict) -> None:
-    """Set one top-level key in a shared JSON file without disturbing the rest.
-
-    run.json and row_counts.json describe the whole pipeline run, not just
-    this one stage — other stages will add their own keys later. Reading the
-    existing file first and only updating our own key means reruns don't
-    wipe out what other stages already wrote.
-    """
-    existing: dict = json.loads(path.read_text()) if path.exists() else {}
-    existing[key] = payload
-    path.write_text(json.dumps(existing, indent=2, sort_keys=True))
-
 # run function is the main entry point of the pipeline where the code written will tie every function together
 def run(run_id: str) -> StageResult:
     """Verify and register the three mandatory Bronze source objects."""
@@ -346,12 +310,12 @@ def run(run_id: str) -> StageResult:
 
     RESULTS_PART1.mkdir(parents=True, exist_ok=True)  # ensure the results folder exists before writing to it
 
-    _merge_json_file(
+    merge_json_file(
         RESULTS_PART1 / "run.json",
-        key="register_sources",
+        "register_sources",
         payload={ # this stage's contribution to the shared run record
             "run_id": run_id,
-            "code_revision": _code_revision(),
+            "code_revision": code_revision(),
             "started_at": result.started_at.isoformat(),
             "finished_at": result.finished_at.isoformat(),
             "input_count": result.input_count,
@@ -364,9 +328,9 @@ def run(run_id: str) -> StageResult:
         },
     )
 
-    _merge_json_file(
+    merge_json_file(
         RESULTS_PART1 / "row_counts.json",
-        key="register_sources",
+        "register_sources",
         payload={ # this stage's contribution to the shared row-count record
             "read": result.input_count,
             "accepted": result.output_count,

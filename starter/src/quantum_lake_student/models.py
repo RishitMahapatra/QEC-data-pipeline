@@ -4,10 +4,52 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]  # walk up from this file's location to the project root
+RESULTS_PART1 = _PROJECT_ROOT / "results" / "part1"  # the folder where all Part I evidence files live
+
+
+def code_revision() -> str:
+    """Best-effort git commit hash for the code that produced this run.
+
+    Falls back to "unknown" outside a git checkout instead of failing the
+    stage - no stage should depend on git being available.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return completed.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unknown"
+
+
+def merge_json_file(path: Path, *keys: str, payload: dict) -> None:
+    """Set one nested key path in a shared JSON file without disturbing the rest.
+
+    run.json and row_counts.json describe the whole pipeline run, not just one
+    stage - other stages, and other sources within the same stage, add their
+    own keys. Reading the existing file first and only replacing the given
+    key path means reruns don't wipe out what else was already written.
+    A single key (e.g. "register_sources") sets a top-level entry; more than
+    one key (e.g. "prepare_data", "google_qec") nests through an intermediate
+    dict, creating it if needed.
+    """
+    existing: dict = json.loads(path.read_text()) if path.exists() else {}
+    node = existing
+    for key in keys[:-1]:
+        node = node.setdefault(key, {})
+    node[keys[-1]] = payload
+    path.write_text(json.dumps(existing, indent=2, sort_keys=True))
 
 
 def stable_record_hash(value: Any) -> str:
