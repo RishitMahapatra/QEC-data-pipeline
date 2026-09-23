@@ -3,7 +3,17 @@
 **/__pycache__/
 **/.pytest_cache/
 **/.venv/
+venv/
 starter/lake/
 starter/reports/
 starter/.coverage
+datasets/
+results/
+*.parquet
+*.pyc
+.ipynb_checkpoints/
+starter/.Trash-0/
+starter/01_discovery.ipynb
+**/discovery_bronze.ipynb
+TASK_SPLIT.md
 
