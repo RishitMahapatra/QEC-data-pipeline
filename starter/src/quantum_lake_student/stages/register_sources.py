@@ -4,239 +4,334 @@ Student responsibilities:
 
 - verify checksums from the release description;
 - list source files and archive members safely;
+- confirm each source has the documented files (CSV set/names/header for
+  qec_syndromes, companion files per experiment for google_qec, source +
+  transpiled circuits for qasmbench) - a missing required file stops the run,
+  same severity as an unsafe archive member;
 - keep the supplied bytes unchanged;
 - report missing or unexpected source objects;
 - make a second run safe: no duplicate source records.
 """
-
-from __future__ import annotations
-
-import hashlib
-import io
-import json
-import subprocess
-import zipfile
-from pathlib import Path, PurePosixPath
-
-import pyarrow as pa
-import pyarrow.parquet as pq
-
-from quantum_lake_student.config import Settings
-from quantum_lake_student.connections import bronze_inventory, minio_client
-from quantum_lake_student.models import StageResult
-
-MANIFEST_OBJECT = "metadata/course-release/bundle-manifest.json"
-
-# Anchored to this file's location rather than a bare relative path, so
-# results/part1/ always lands at the project root regardless of the caller's
-# current working directory (a notebook kernel's cwd is its own folder, not
-# the project root).
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-RESULTS_PART1 = _PROJECT_ROOT / "results" / "part1"
-
-EXPECTED_QASM_BENCHMARKS = {
-    "error_correctiond3_n5",
-    "qec_en_n5",
-    "qec_sm_n5",
-}
-EXPECTED_GOOGLE_EXPERIMENTS = {
-    "surface_code_bX_d3_r25_center_3_5",
-    "surface_code_bX_d3_r25_center_5_3",
-    "surface_code_bX_d3_r25_center_5_7",
-    "surface_code_bX_d3_r25_center_7_5",
-    "surface_code_bX_d5_r25_center_5_5",
-}
-GOOGLE_REQUIRED_FILES = {
-    "properties.yml", "layout.svg", "circuit_ideal.stim", "circuit_noisy.stim",
-    "circuit_detector_error_model.dem", "pij_from_even_for_odd.dem",
-    "pij_from_odd_for_even.dem", "measurements.b8", "sweep.b8",
-    "detection_events.b8", "obs_flips_actual.01",
-    "obs_flips_predicted_by_pymatching.01",
-    "obs_flips_predicted_by_correlated_matching.01",
-    "obs_flips_predicted_by_belief_matching.01",
-    "obs_flips_predicted_by_tensor_network_contraction.01",
-}
-SYNDROME_HEADER = "labels,syndromes,quantity"
+# ─────────────────────────────────────────────────────────────────────────
+# OVERVIEW
+#
+# This file is the Bronze-stage entry point for the pipeline. It is the
+# first code that runs after `make bootstrap` copies the raw zip files
+# into MinIO. Its job is to prove those three files are exactly what the
+# course says they should be, before anything downstream (Silver parsing,
+# Gold loading, ML export) is allowed to trust them.
+#
+# Concretely, for each of the 3 mandatory sources (qec_syndromes, google_qec,
+# qasmbench), this file:
+#   1. Downloads the object from Bronze and checks its hash + size against
+#      the course-supplied manifest (proves the bytes are unmodified).
+#   2. Opens it as a zip and rejects any unsafe internal path (../, absolute
+#      paths, drive letters) before anything is ever extracted.
+#   3. Runs a source-specific structural check (right file count, right
+#      names, right folder layout) WITHOUT parsing any actual file content —
+#      that parsing belongs to Silver, not here.
+#   4. Records what happened into run.json / row_counts.json, so every
+#      later pipeline run has a paper trail of exactly what was verified,
+#      when, and against which hashes.
+#
+# Everything here is read-only against Bronze — this file never edits,
+# extracts, or rewrites the source zips. If any check fails, it raises
+# BronzeError, which is meant to stop the whole run rather than let bad
+# data flow forward silently.
+# ─────────────────────────────────────────────────────────────────────────
 
 
-class BronzeVerificationError(RuntimeError):
-    """Raised when a supplied source object fails a required Bronze check."""
+import io #treats the raw bytes file as a normal file so that zipfile can open them without accessing the disk
+import zipfile # for reading the zipfile directly from memory
+import json #for handling the JSON files
+import re #request -> for pattern matching for file names and folders
+from pathlib import Path # convenient, OS-safe file path handling
+
+from quantum_lake_student.models import RESULTS_PART1, StageResult, code_revision, merge_json_file
+
+MANIFEST_PATH = Path("/course-data/metadata/bundle-manifest.json") #the path is where the assignment requires the hash files to be located 
 
 
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _load_manifest() -> dict:
+    """Read the course-supplied manifest describing every mandatory source object."""
+    return json.loads(MANIFEST_PATH.read_text()) #  parsing the manifest JSON into a Python dict
 
 
-def _safe_member_names(data: bytes, object_name: str) -> list[str]:
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        names = archive.namelist()
-    unsafe = [
-        name for name in names
-        if PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts
-    ]
+def _bronze_key(manifest_path: str) -> str:
+    """Map a manifest path like 'raw/source=X/f.zip' to its Bronze key 'bronze/source=X/f.zip'."""
+    return manifest_path.replace("raw/", "bronze/", 1)
+
+#adding a hashing function 
+import hashlib #hashlib uses the SHA-256 encryption algo to verify file integrity
+
+# ADDED: bronze_inventory lets us cross-check the manifest against what's
+# actually sitting in MinIO, so a genuinely missing object is caught here
+# with a clear error, instead of surfacing later as a confusing MinIO
+# "not found" exception from _read_object_bytes.
+from quantum_lake_student.connections import Settings, minio_client, bronze_inventory # env config + MinIO client factory + inventory listing
+
+
+class BronzeError(RuntimeError):
+    """A Bronze object failed verification. The caller must stop the run."""
+#a custom exception type so callers can tell "bad data" apart from any other error
+       
+def _read_object_bytes(settings: Settings, object_name: str) -> bytes:
+    """Fetch one Bronze object's raw bytes from MinIO, fully unread into memory."""
+    client = minio_client(settings) #getting the minio client using the env settings
+    resp = client.get_object(settings.s3_bucket, object_name) # start streaming with the object's bytes
+    try:
+        return resp.read() # pull the entire object into memory as bytes
+    finally:
+        resp.close() #closing the HTTP connnection
+        resp.release_conn() #returning connection to the HTTP pool to avoid dataleakage
+
+
+# ADDED: cross-checks a manifest entry's path against the real Bronze
+# inventory before we ever try to fetch it, so a missing mandatory object
+# gets one clear BronzeError here rather than a raw MinIO exception later.
+def _bronze_object_name(manifest_path: str, inventory: dict[str, int]) -> str | None:
+    """Map a manifest path to its Bronze key, but only if that key actually exists in Bronze."""
+    candidate = _bronze_key(manifest_path)
+    return candidate if candidate in inventory else None
+        
+
+def _verify_object(settings: Settings, manifest_entry: dict, inventory: dict[str, int]) -> tuple[str, bytes]:
+    """Fetch one object and confirm its hash and size match the manifest exactly."""
+    # ADDED: confirm the object is actually present in Bronze before fetching it,
+    # so a missing mandatory object fails with our own BronzeError, not MinIO's.
+    object_name = _bronze_object_name(manifest_entry["path"], inventory)
+    if object_name is None:
+        raise BronzeError(f"missing mandatory source object: {manifest_entry['path']}")
+
+    data = _read_object_bytes(settings, object_name) 
+
+    actual_hash = hashlib.sha256(data).hexdigest() #computing the hash download
+    if actual_hash != manifest_entry["sha256"]: #compare against the expected hash
+        raise BronzeError( #raises error in case of hash mismatch
+            f"{object_name}: hash mismatch — expected {manifest_entry['sha256']}, "
+            f"got {actual_hash}"
+        )
+
+    if len(data) != manifest_entry["bytes"]: #checking if the expected number of bytes matches the current extracted bytes. If not, then raise the BronzeError. 
+        raise BronzeError(
+            f"{object_name}: size mismatch — expected {manifest_entry['bytes']} bytes, "
+            f"got {len(data)}"
+        )
+
+    return object_name, data
+
+def is_unsafe_member(name: str) -> bool: #The main purpose of this function is to handle the file paths
+    """True if a zip member path could escape the archive's extraction directory."""
+    normalized = name.replace("\\", "/") # treating the Windows-style backslashes the same as forward slashes
+    parts = normalized.split("/") #breaking the paths into individual segments
+    return normalized.startswith("/") or ".." in parts or ":" in parts[0] # unsafe if: it's an absolute path, contains a ".." traversal segment, or starts with a drive letter
+
+
+def _check_archive_safety(object_name: str, data: bytes) -> list[str]:
+    """Open a Bronze zip and return the list of its member names, after confirming none are unsafe."""
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        members = zf.namelist()
+
+    unsafe = [m for m in members if is_unsafe_member(m)]
     if unsafe:
-        raise BronzeVerificationError(
-            f"Unsafe archive member path(s) in {object_name}: {unsafe[:5]}"
-        )
-    return names
+        raise BronzeError(f"{object_name}: unsafe archive member(s): {unsafe}")
+
+    return members  # return the validated member list for reuse by other checks
 
 
-def _verify_syndromes(data: bytes, names: list[str]) -> None:
-    csv_members = [n for n in names if n.endswith(".csv")]
-    if len(csv_members) != 7:
-        raise BronzeVerificationError(
-            f"Expected 7 syndrome CSV files, found {len(csv_members)}: {csv_members}"
+SYNDROME_CSV_PATTERN = re.compile(r"^d-3_pfr-\d+\.\d{6}_nb-10M\.csv$")  #the documented syndrome filename shape
+SYNDROME_CSV_HEADER = "labels,syndromes,quantity" #The exact expected csv header line
+
+#This function is to check whether the file name matches the specifications of the dataset 
+
+#Starting the verification with the Syndrome dataset 
+def _check_syndrome_structure(data: bytes, members: list[str]) -> None:
+    """Confirm the qec_syndromes archive has exactly 7 correctly-named CSVs with the right header."""
+    csv_members = sorted(m for m in members if m.endswith(".csv")) #extracting all the csv files inside the mentioned folder
+
+    if len(csv_members) != 7: #since there are 7 datasets for syndromes, the count must match
+        raise BronzeError( #else raise the BronzeError
+            f"expected 7 qec_syndromes CSV files, found {len(csv_members)}: {csv_members}"
         )
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf: #checking if the file name matches the documented pattern
         for member in csv_members:
-            header = archive.read(member).splitlines()[0].decode("utf-8")
-            if header != SYNDROME_HEADER:
-                raise BronzeVerificationError(f"Unexpected header in {member}: {header}")
+            if not SYNDROME_CSV_PATTERN.match(member):
+                raise BronzeError(
+                    f"qec_syndromes file name does not match the documented "
+                    f"pattern: {member}"
+                )
+            header = zf.read(member).split(b"\n", 1)[0].decode("utf-8").strip() #reading the first line
+            if header != SYNDROME_CSV_HEADER: #confirms if the header matches exactly
+                raise BronzeError(
+                    f"{member}: header {header!r} does not match the "
+                    f"documented header {SYNDROME_CSV_HEADER!r}"
+                )
 
+#verification of the files in the google QEC shot datasets
+GOOGLE_DIR_PATTERN = re.compile(r"^surface_code_bX_d(\d+)_r\d+_center_\d+_\d+$") #capturing the d value (distance digit)
+GOOGLE_EXPECTED_D3_COUNT = 4 #there are exactly 4 distance experiments mentioned 
+GOOGLE_EXPECTED_D5_COUNT = 1 # exactly 1 distance-5 experiment folder expected
 
-def _verify_qasmbench(names: list[str]) -> None:
-    benchmarks = {n.split("/")[1] for n in names if n.startswith("small/") and n.endswith(".qasm")}
-    if benchmarks != EXPECTED_QASM_BENCHMARKS:
-        raise BronzeVerificationError(f"QASMBench benchmark set mismatch: {sorted(benchmarks)}")
-    for benchmark in EXPECTED_QASM_BENCHMARKS:
-        source = f"small/{benchmark}/{benchmark}.qasm"
-        transpiled = f"small/{benchmark}/{benchmark}_transpiled.qasm"
-        missing = [p for p in (source, transpiled) if p not in names]
-        if missing:
-            raise BronzeVerificationError(f"QASMBench {benchmark} missing: {missing}")
-
-
-def _verify_google(names: list[str]) -> None:
-    experiments = {n.split("/")[0] for n in names if "/" in n and n.startswith("surface_code_")}
-    if experiments != EXPECTED_GOOGLE_EXPERIMENTS:
-        raise BronzeVerificationError(f"Google experiment set mismatch: {sorted(experiments)}")
-    name_set = set(names)
-    for experiment in experiments:
-        missing = {f for f in GOOGLE_REQUIRED_FILES if f"{experiment}/{f}" not in name_set}
-        if missing:
-            raise BronzeVerificationError(
-                f"Google experiment {experiment} missing files: {sorted(missing)}"
-            )
-
-
-_SOURCES = (
-    (
-        "raw/source=qasmbench/qasmbench-qec.zip",
-        "bronze/source=qasmbench/qasmbench-qec.zip",
-        lambda data, names: _verify_qasmbench(names),
-    ),
-    (
-        "raw/source=qec_syndromes/syndromes_dataset.zip",
-        "bronze/source=qec_syndromes/syndromes_dataset.zip",
-        lambda data, names: _verify_syndromes(data, names),
-    ),
-    (
-        "raw/source=google_qec/google-surface-code-curated.zip",
-        "bronze/source=google_qec/google-surface-code-curated.zip",
-        lambda data, names: _verify_google(names),
-    ),
+GOOGLE_REQUIRED_COMPANIONS = (  # listing every file that must exist inside each experiment folder
+    "properties.yml",
+    "measurements.b8",
+    "sweep.b8",
+    "detection_events.b8",
+    "obs_flips_actual.01",
+    "obs_flips_predicted_by_belief_matching.01",
+    "obs_flips_predicted_by_correlated_matching.01",
+    "obs_flips_predicted_by_pymatching.01",
+    "obs_flips_predicted_by_tensor_network_contraction.01",
+    "circuit_ideal.stim",
+    "circuit_noisy.stim",
+    "circuit_detector_error_model.dem",
+    "layout.svg",
+    "pij_from_even_for_odd.dem",
+    "pij_from_odd_for_even.dem",
 )
 
 
-def _code_revision() -> str:
-    #Identify which commit produced this run's registrations, for run.json.
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(_PROJECT_ROOT), "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
+def _check_google_structure(members: list[str]) -> None:
+    """Confirm google_qec has exactly 4 distance-3 + 1 distance-5 experiment
+    directories, each with every required companion file."""
+    experiment_dirs = sorted({m.split("/", 1)[0] for m in members if "/" in m})
+
+    d3_dirs = [] #this will hold all the files with distance d = 3
+    d5_dirs = [] #this will hold all the files with distance d = 5
+    for name in experiment_dirs:
+        match = GOOGLE_DIR_PATTERN.match(name) #extracting the digit from the folder name
+        if not match:
+            raise BronzeError(f"google_qec directory name is not in the documented format: {name}")
+        distance = match.group(1) # pull out the captured distance number
+        if distance == "3": #if the distance value is 3
+            d3_dirs.append(name)  #add it to the list of the d3_dirs
+        elif distance == "5": #else if distance value is 5
+            d5_dirs.append(name) #add it to the list of the d5_dirs
+        else: #if none of the extracted digit matches to 3 or 5 -> raise the BronzeError 
+            raise BronzeError(f"google_qec directory has an unexpected distance value: {name}")
+
+    if len(d3_dirs) != GOOGLE_EXPECTED_D3_COUNT or len(d5_dirs) != GOOGLE_EXPECTED_D5_COUNT: #if none of the file count matches the expected count (for both d3 or d5) -> raise the BronzeError
+        raise BronzeError(
+            f"expected {GOOGLE_EXPECTED_D3_COUNT} distance-3 and {GOOGLE_EXPECTED_D5_COUNT} "
+            f"distance-5 directories, found {len(d3_dirs)} distance-3 and {len(d5_dirs)} distance-5"
         )
-    except OSError:
-        return "git-unavailable"
-    return completed.stdout.strip() if completed.returncode == 0 else "no-git-checkout"
+
+    member_set = set(members) # Convert to a set for fast "is this path present" checks
+    for experiment_dir in experiment_dirs: # find any required companion file that's absent from this folder
+        missing = [
+            name for name in GOOGLE_REQUIRED_COMPANIONS
+            if f"{experiment_dir}/{name}" not in member_set
+        ]
+        if missing: #will raise the BronzeError if any companion file is missing 
+            raise BronzeError(
+                f"google_qec experiment {experiment_dir!r} is missing required companion file(s): {missing}"
+            )
+
+#Now building the QASM structural check 
+QASMBENCH_CIRCUITS = ("error_correctiond3_n5", "qec_en_n5", "qec_sm_n5") #contains the documented circuit names
 
 
-def _merge_json_file(path: Path, key: str, payload: dict) -> None:
-    #Overwrite this stage's section of a JSON file shared across the pipeline.
-    existing: dict = json.loads(path.read_text()) if path.exists() else {}
-    existing[key] = payload
-    path.write_text(json.dumps(existing, indent=2, sort_keys=True))
+def _check_qasmbench_structure(members: list[str]) -> None:
+    """Confirm qasmbench has exactly the 3 documented circuits, each with
+    both its source and transpiled QASM variant, and no extra circuit directories."""
+    member_set = set(members) #using set for fast lookup 
 
+    for circuit in QASMBENCH_CIRCUITS:
+        for variant in (f"{circuit}.qasm", f"{circuit}_transpiled.qasm"):
+            path = f"small/{circuit}/{variant}"
+            if path not in member_set:
+                raise BronzeError(f"qasmbench is missing required circuit file: {path}")
 
+    actual_circuit_dirs = sorted({ # list every actual circuit-folder name found in the archive
+        m.split("/")[1] for m in members
+        if m.startswith("small/") and m.count("/") >= 2
+    })
+    expected_circuit_dirs = sorted(QASMBENCH_CIRCUITS) #the exact set we expect to see
+    if actual_circuit_dirs != expected_circuit_dirs: #comparing the 2 sets 
+        extra = set(actual_circuit_dirs) - set(expected_circuit_dirs) 
+        missing = set(expected_circuit_dirs) - set(actual_circuit_dirs)
+        raise BronzeError(
+            f"qasmbench circuit directories do not match exactly — "
+            f"extra: {sorted(extra) or 'none'}, missing: {sorted(missing) or 'none'}"
+        )
+        
+# run function is the main entry point of the pipeline where the code written will tie every function together
 def run(run_id: str) -> StageResult:
-    settings = Settings.from_environment()
-    client = minio_client(settings)
-    result = StageResult(stage="register_sources", run_id=run_id)
+    """Verify and register the three mandatory Bronze source objects."""
+    settings = Settings.from_environment() #loading connection config from environment variables 
+    result = StageResult(stage="register_sources", run_id=run_id) # start tracking this run's outcome
 
+    # ADDED: list what's actually sitting in Bronze right now, so we can both
+    # (a) confirm each mandatory object truly exists before fetching it, and
+    # (b) report any *unexpected* extra object the manifest doesn't mention —
+    # this closes the "report missing or unexpected source objects" line
+    # from the module docstring, which previously only covered "missing".
     inventory = dict(bronze_inventory(settings))
-    result.input_count = len(inventory)
 
-    manifest = json.loads(client.get_object(settings.s3_bucket, MANIFEST_OBJECT).read())
-    expected_by_path = {item["path"]: item for item in manifest["objects"]}
+    manifest = _load_manifest() #read the expected-objects manifest
+    mandatory_objects = [obj for obj in manifest["objects"] if obj["mandatory"]] # keep only the required ones
+    result.input_count = len(mandatory_objects)  # record how many objects we expect to process
 
-    registrations: list[dict] = []
-    expected_bronze_names: set[str] = set()
+    registrations: list[dict] = [] #collecting one summary dict per verified object
+    expected_names: set[str] = set()  # ADDED: every Bronze key the manifest says should exist
 
-    for manifest_path, object_name, verify in _SOURCES:
-        expected = expected_by_path[manifest_path]
-        expected_bronze_names.add(object_name)
+    for obj in mandatory_objects:
+        expected_names.add(_bronze_key(obj["path"]))  # ADDED: track expected key for the unexpected-object diff below
+        object_name, data = _verify_object(settings, obj, inventory)
+        members = _check_archive_safety(object_name, data)
 
-        if object_name not in inventory:
-            raise BronzeVerificationError(f"missing mandatory source object: {object_name}")
+        #routing to the correct file based on the source name 
+        if obj["source"] == "qec_syndromes":
+            _check_syndrome_structure(data, members)
+        elif obj["source"] == "google_qec":
+            _check_google_structure(members)
+        elif obj["source"] == "qasmbench":
+            _check_qasmbench_structure(members)
 
-        data = client.get_object(settings.s3_bucket, object_name).read()
+        registrations.append({ # record this object's verification summary
+            "source_name": obj["source"],
+            "bronze_object": object_name,
+            "input_sha256": obj["sha256"],
+            "size_bytes": len(data),
+            "member_count": len(members),
+        })
 
-        if len(data) != expected["bytes"]:
-            raise BronzeVerificationError(
-                f"{object_name}: size mismatch, expected {expected['bytes']}, got {len(data)}"
-            )
-        actual_hash = _sha256(data)
-        if actual_hash != expected["sha256"]:
-            raise BronzeVerificationError(
-                f"{object_name}: checksum mismatch, expected {expected['sha256']}, got {actual_hash}"
-            )
-
-        names = _safe_member_names(data, object_name)
-        verify(data, names)
-
-        registrations.append(
-            {
-                "source_name": expected["source"],
-                "bronze_object": object_name,
-                "input_sha256": actual_hash,
-                "size_bytes": len(data),
-                "member_count": len(names),
-            }
-        )
-
-    unexpected = sorted(set(inventory) - expected_bronze_names)
+    # ADDED: report (but don't fail on) any Bronze object present that the
+    # manifest doesn't mandate — an extra object doesn't corrupt a mandatory
+    # one, so this is a warning rather than a BronzeError.
+    unexpected = sorted(set(inventory) - expected_names)
     if unexpected:
         print(f"WARNING: unexpected Bronze objects present: {unexpected}")
 
-    RESULTS_PART1.mkdir(parents=True, exist_ok=True)
-    # Overwritten wholesale on every run (sorted for a stable diff), not
-    # appended to - a second run reflects the current Bronze state exactly
-    # once, instead of accumulating one row per historical run.
-    table = pa.Table.from_pylist(sorted(registrations, key=lambda r: r["source_name"]))
-    pq.write_table(table, RESULTS_PART1 / "source_registration.parquet")
+    result.output_count = len(registrations)  # how many objects were successfully verified
+    result.issue_count = len(unexpected)  # ADDED: unexpected objects counted as issues, not silently ignored
+    result.finish()  # mark the finish timestamp on the result
 
-    result.output_count = len(registrations)
-    result.issue_count = len(unexpected)
-    result.finish()
+    RESULTS_PART1.mkdir(parents=True, exist_ok=True)  # ensure the results folder exists before writing to it
 
-    _merge_json_file(
+    merge_json_file(
         RESULTS_PART1 / "run.json",
-        key="register_sources",
-        payload={
+        "register_sources",
+        payload={ # this stage's contribution to the shared run record
             "run_id": run_id,
-            "code_revision": _code_revision(),
+            "code_revision": code_revision(),
             "started_at": result.started_at.isoformat(),
             "finished_at": result.finished_at.isoformat(),
             "input_count": result.input_count,
             "output_count": result.output_count,
             "issue_count": result.issue_count,
-            "input_hashes": {r["source_name"]: r["input_sha256"] for r in registrations},
+            "input_hashes": {
+                r["source_name"]: r["input_sha256"] for r in registrations
+            },
+            "unexpected_bronze_objects": unexpected,  # ADDED: surface exactly what was unexpected, not just the count
         },
     )
-    _merge_json_file(
+
+    merge_json_file(
         RESULTS_PART1 / "row_counts.json",
-        key="register_sources",
-        payload={
+        "register_sources",
+        payload={ # this stage's contribution to the shared row-count record
             "read": result.input_count,
             "accepted": result.output_count,
             "rejected": result.issue_count,
