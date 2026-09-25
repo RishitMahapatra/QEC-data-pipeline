@@ -4,536 +4,345 @@ Student responsibilities:
 
 - verify checksums from the release description;
 - list source files and archive members safely;
+- confirm each source has the documented files (CSV set/names/header for
+  qec_syndromes, companion files per experiment for google_qec, source +
+  transpiled circuits for qasmbench) - a missing required file stops the run,
+  same severity as an unsafe archive member;
 - keep the supplied bytes unchanged;
 - report missing or unexpected source objects;
 - make a second run safe: no duplicate source records.
-
-This module covers exactly the Bronze responsibilities above
-(``ASSIGNMENT_SPEC.md`` section 5):
-
-- verify each object's SHA-256 hash and byte size against the course's
-  release manifest (``metadata/bundle-manifest.json``);
-- list every archive member path safely, without extracting or altering
-  any bytes, and check the archive's own CRC integrity;
-- report source objects that are missing (declared but absent) or
-  unexpected (present but undeclared);
-- produce a stable, content-derived registration record per object, so a
-  second run on unchanged input is safe: no duplicate or drifting records.
-
-Out of scope, on purpose: this module does not parse CSV rows, Stim
-``b8``/``01`` files, or QASM circuits, and does not decide row meaning or
-build Silver tables. That is ``prepare_data.py``'s job.
-
-Run it directly::
-
-    python -m quantum_lake_student.stages.register_sources
-
-By default it looks for the course bundle (a directory containing ``raw/``
-and ``metadata/``) at ``/course-data`` (the Docker workspace mount) or,
-failing that, by walking up from this file to find
-``datasets/student-bundle/core``. Override with ``--bundle-root`` or the
-``QEC_BUNDLE_ROOT`` environment variable. Results are written to
-``results/part1/data_issues.parquet`` and
-``results/part1/bronze_inventory.json``.
 """
-
-from __future__ import annotations
-
-import argparse
-import csv
-import hashlib
-import json
-import os
-import re
-import zipfile
-from collections import Counter
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-
-from quantum_lake_student.models import QualityFinding, Severity, StageResult
-
-
-# --------------------------------------------------------------------------
-# Shared helpers
-# --------------------------------------------------------------------------
-
-
-def is_safe_member_path(name: str) -> bool:
-    """Reject archive member paths that could escape an extraction root.
-
-    No absolute paths, no Windows drive letters, and no ``..`` traversal
-    segment. Bronze must be able to *list* archive members safely without
-    ever extracting something outside its own directory.
-    """
-    if not name or name.startswith("/") or name.startswith("\\"):
-        return False
-    if re.match(r"^[A-Za-z]:[\\/]", name):
-        return False
-    return ".." not in Path(name.replace("\\", "/")).parts
+# ─────────────────────────────────────────────────────────────────────────
+# OVERVIEW
+#
+# This file is the Bronze-stage entry point for the pipeline. It is the
+# first code that runs after `make bootstrap` copies the raw zip files
+# into MinIO. Its job is to prove those three files are exactly what the
+# course says they should be, before anything downstream (Silver parsing,
+# Gold loading, ML export) is allowed to trust them.
+#
+# Concretely, for each of the 3 mandatory sources (qec_syndromes, google_qec,
+# qasmbench), this file:
+#   1. Downloads the object from Bronze and checks its hash + size against
+#      the course-supplied manifest (proves the bytes are unmodified).
+#   2. Opens it as a zip and rejects any unsafe internal path (../, absolute
+#      paths, drive letters) before anything is ever extracted.
+#   3. Runs a source-specific structural check (right file count, right
+#      names, right folder layout) WITHOUT parsing any actual file content —
+#      that parsing belongs to Silver, not here.
+#   4. Records what happened into run.json / row_counts.json, so every
+#      later pipeline run has a paper trail of exactly what was verified,
+#      when, and against which hashes.
+#
+# Everything here is read-only against Bronze — this file never edits,
+# extracts, or rewrites the source zips. If any check fails, it raises
+# BronzeError, which is meant to stop the whole run rather than let bad
+# data flow forward silently.
+# ─────────────────────────────────────────────────────────────────────────
 
 
-def _finding(
-    *,
-    rule_id: str,
-    severity: Severity,
-    source_system: str,
-    source_record_locator: str,
-    message: str,
-    observed_value: Any = None,
-) -> QualityFinding:
-    return QualityFinding(
-        rule_id=rule_id,
-        severity=severity,
-        source_system=source_system,
-        source_record_locator=source_record_locator,
-        message=message,
-        observed_value=None if observed_value is None else str(observed_value),
-    )
+import io #treats the raw bytes file as a normal file so that zipfile can open them without accessing the disk
+import zipfile # for reading the zipfile directly from memory
+import json #for handling the JSON files
+import re #request -> for pattern matching for file names and folders
+from pathlib import Path # convenient, OS-safe file path handling
+
+from quantum_lake_student.models import RESULTS_PART1, StageResult, code_revision, merge_json_file
+
+MANIFEST_PATH = Path("/course-data/metadata/bundle-manifest.json") #the path is where the assignment requires the hash files to be located 
 
 
-# --------------------------------------------------------------------------
-# Release manifest
-# --------------------------------------------------------------------------
+def _load_manifest() -> dict:
+    """Read the course-supplied manifest describing every mandatory source object."""
+    return json.loads(MANIFEST_PATH.read_text()) #  parsing the manifest JSON into a Python dict
 
 
-@dataclass(frozen=True)
-class ManifestObject:
-    """One object's declared identity, as recorded by the course release."""
+def _bronze_key(manifest_path: str) -> str:
+    """Map a manifest path like 'raw/source=X/f.zip' to its Bronze key 'bronze/source=X/f.zip'."""
+    return manifest_path.replace("raw/", "bronze/", 1)
 
-    path: str  # bundle-relative, e.g. "raw/source=qec_syndromes/syndromes_dataset.zip"
-    source: str
-    bytes: int
-    sha256: str
-    mandatory: bool
+#adding a hashing function 
+import hashlib #hashlib uses the SHA-256 encryption algo to verify file integrity
 
-
-def load_release_manifest(metadata_dir: Path) -> list[ManifestObject]:
-    """Load the course-supplied object manifest (hashes, sizes, mandatory flags)."""
-    manifest = json.loads((metadata_dir / "bundle-manifest.json").read_text(encoding="utf-8"))
-    return [
-        ManifestObject(
-            path=entry["path"],
-            source=entry["source"],
-            bytes=entry["bytes"],
-            sha256=entry["sha256"],
-            mandatory=entry.get("mandatory", True),
-        )
-        for entry in manifest["objects"]
-    ]
+# ADDED: bronze_inventory lets us cross-check the manifest against what's
+# actually sitting in MinIO, so a genuinely missing object is caught here
+# with a clear error, instead of surfacing later as a confusing MinIO
+# "not found" exception from _read_object_bytes.
+from quantum_lake_student.connections import Settings, minio_client, bronze_inventory # env config + MinIO client factory + inventory listing
 
 
-# --------------------------------------------------------------------------
-# Hashing, archive integrity, and safe listing
-# --------------------------------------------------------------------------
-
-
-def sha256_of_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
-    """Stream-hash a file without loading it entirely into memory."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(chunk_size), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def list_archive_members(path: Path) -> list[dict[str, Any]]:
-    """List every member path/size without extracting any bytes."""
-    with zipfile.ZipFile(path) as archive:
-        return [
-            {"name": info.filename, "bytes": info.file_size, "is_dir": info.is_dir()}
-            for info in archive.infolist()
-        ]
-
-
-def check_archive_integrity(path: Path) -> str | None:
-    """Run the zip's own CRC check; return the first corrupt member, or None."""
-    with zipfile.ZipFile(path) as archive:
-        return archive.testzip()
-
-
-# --------------------------------------------------------------------------
-# Per-object verification and stable registration records
-# --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class BronzeObjectRecord:
-    """Stable, content-derived registration record for one Bronze object.
-
-    Deliberately excludes anything time-dependent (no timestamps, no run
-    ID) so a second run on unchanged input produces a byte-identical
-    record -- the "no duplicate source records" / safe-rerun requirement.
-    Run-level evidence (when this ran) belongs in ``run.json``/
-    ``StageResult``, not here.
-    """
-
-    source: str
-    object_path: str
-    bytes: int
-    sha256: str
-    member_count: int
-    mandatory: bool
-
-
-@dataclass
-class BronzeVerificationResult:
-    findings: list[QualityFinding] = field(default_factory=list)
-    records: list[BronzeObjectRecord] = field(default_factory=list)
-    objects_declared: int = 0
-
-    def merge(self, other: "BronzeVerificationResult") -> None:
-        self.findings.extend(other.findings)
-        self.records.extend(other.records)
-        self.objects_declared += other.objects_declared
-
-    def summary(self) -> dict[str, Any]:
-        return {
-            "objects_declared": self.objects_declared,
-            "objects_verified": len(self.records),
-            "issue_count": len(self.findings),
-            "issues_by_severity": dict(Counter(f.severity.value for f in self.findings)),
-            "issues_by_rule": dict(Counter(f.rule_id for f in self.findings)),
-        }
-
-
-def verify_bronze_object(
-    local_path: Path, manifest_entry: ManifestObject
-) -> BronzeVerificationResult:
-    """Verify one supplied object against its manifest entry.
-
-    Checks existence, byte-for-byte size and SHA-256 match, safe archive
-    member paths, and archive CRC integrity. Never rewrites, extracts, or
-    otherwise alters the object -- Bronze bytes stay exactly as supplied.
-    """
-    result = BronzeVerificationResult()
-    locator = manifest_entry.path
-
-    if not local_path.exists():
-        result.findings.append(
-            _finding(
-                rule_id="bronze.missing_object",
-                severity=Severity.ERROR,
-                source_system=manifest_entry.source,
-                source_record_locator=locator,
-                message="declared source object was not found",
-            )
-        )
-        return result
-
-    actual_bytes = local_path.stat().st_size
-    if actual_bytes != manifest_entry.bytes:
-        result.findings.append(
-            _finding(
-                rule_id="bronze.size_mismatch",
-                severity=Severity.ERROR,
-                source_system=manifest_entry.source,
-                source_record_locator=locator,
-                message="object byte size does not match the release manifest",
-                observed_value={"actual": actual_bytes, "expected": manifest_entry.bytes},
-            )
-        )
-
-    actual_sha256 = sha256_of_file(local_path)
-    if actual_sha256 != manifest_entry.sha256:
-        result.findings.append(
-            _finding(
-                rule_id="bronze.hash_mismatch",
-                severity=Severity.ERROR,
-                source_system=manifest_entry.source,
-                source_record_locator=locator,
-                message="object SHA-256 does not match the release manifest",
-                observed_value={"actual": actual_sha256, "expected": manifest_entry.sha256},
-            )
-        )
-
+class BronzeError(RuntimeError):
+    """A Bronze object failed verification. The caller must stop the run."""
+#a custom exception type so callers can tell "bad data" apart from any other error
+       
+def _read_object_bytes(settings: Settings, object_name: str) -> bytes:
+    """Fetch one Bronze object's raw bytes from MinIO, fully unread into memory."""
+    client = minio_client(settings) #getting the minio client using the env settings
+    resp = client.get_object(settings.s3_bucket, object_name) # start streaming with the object's bytes
     try:
-        members = list_archive_members(local_path)
-    except zipfile.BadZipFile as exc:
-        result.findings.append(
-            _finding(
-                rule_id="bronze.corrupt_archive",
-                severity=Severity.ERROR,
-                source_system=manifest_entry.source,
-                source_record_locator=locator,
-                message=str(exc),
-            )
-        )
-        return result
+        return resp.read() # pull the entire object into memory as bytes
+    finally:
+        resp.close() #closing the HTTP connnection
+        resp.release_conn() #returning connection to the HTTP pool to avoid dataleakage
 
-    unsafe = [
-        member["name"]
-        for member in members
-        if not member["is_dir"] and not is_safe_member_path(member["name"])
-    ]
+
+# ADDED: cross-checks a manifest entry's path against the real Bronze
+# inventory before we ever try to fetch it, so a missing mandatory object
+# gets one clear BronzeError here rather than a raw MinIO exception later.
+def _bronze_object_name(manifest_path: str, inventory: dict[str, int]) -> str | None:
+    """Map a manifest path to its Bronze key, but only if that key actually exists in Bronze."""
+    candidate = _bronze_key(manifest_path)
+    return candidate if candidate in inventory else None
+        
+
+def _verify_object(settings: Settings, manifest_entry: dict, inventory: dict[str, int]) -> tuple[str, bytes]:
+    """Fetch one object and confirm its hash and size match the manifest exactly."""
+    # ADDED: confirm the object is actually present in Bronze before fetching it,
+    # so a missing mandatory object fails with our own BronzeError, not MinIO's.
+    object_name = _bronze_object_name(manifest_entry["path"], inventory)
+    if object_name is None:
+        raise BronzeError(f"missing mandatory source object: {manifest_entry['path']}")
+
+    data = _read_object_bytes(settings, object_name) 
+
+    actual_hash = hashlib.sha256(data).hexdigest() #computing the hash download
+    if actual_hash != manifest_entry["sha256"]: #compare against the expected hash
+        raise BronzeError( #raises error in case of hash mismatch
+            f"{object_name}: hash mismatch — expected {manifest_entry['sha256']}, "
+            f"got {actual_hash}"
+        )
+
+    if len(data) != manifest_entry["bytes"]: #checking if the expected number of bytes matches the current extracted bytes. If not, then raise the BronzeError. 
+        raise BronzeError(
+            f"{object_name}: size mismatch — expected {manifest_entry['bytes']} bytes, "
+            f"got {len(data)}"
+        )
+
+    return object_name, data
+
+def is_unsafe_member(name: str) -> bool: #The main purpose of this function is to handle the file paths
+    """True if a zip member path could escape the archive's extraction directory."""
+    normalized = name.replace("\\", "/") # treating the Windows-style backslashes the same as forward slashes
+    parts = normalized.split("/") #breaking the paths into individual segments
+    return normalized.startswith("/") or ".." in parts or ":" in parts[0] # unsafe if: it's an absolute path, contains a ".." traversal segment, or starts with a drive letter
+
+
+def _check_archive_safety(object_name: str, data: bytes) -> list[str]:
+    """Open a Bronze zip and return the list of its member names, after confirming none are unsafe."""
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        members = zf.namelist()
+
+    unsafe = [m for m in members if is_unsafe_member(m)]
     if unsafe:
-        result.findings.append(
-            _finding(
-                rule_id="bronze.unsafe_member_path",
-                severity=Severity.ERROR,
-                source_system=manifest_entry.source,
-                source_record_locator=locator,
-                message="archive contains member path(s) unsafe to extract",
-                observed_value=unsafe,
-            )
+        raise BronzeError(f"{object_name}: unsafe archive member(s): {unsafe}")
+
+    return members  # return the validated member list for reuse by other checks
+
+
+SYNDROME_CSV_PATTERN = re.compile(r"^d-3_pfr-\d+\.\d{6}_nb-10M\.csv$")  #the documented syndrome filename shape
+SYNDROME_CSV_HEADER = "labels,syndromes,quantity" #The exact expected csv header line
+
+#This function is to check whether the file name matches the specifications of the dataset 
+
+#Starting the verification with the Syndrome dataset 
+def _check_syndrome_structure(data: bytes, members: list[str]) -> None:
+    """Confirm the qec_syndromes archive has exactly 7 correctly-named CSVs with the right header."""
+    csv_members = sorted(m for m in members if m.endswith(".csv")) #extracting all the csv files inside the mentioned folder
+
+    if len(csv_members) != 7: #since there are 7 datasets for syndromes, the count must match
+        raise BronzeError( #else raise the BronzeError
+            f"expected 7 qec_syndromes CSV files, found {len(csv_members)}: {csv_members}"
         )
 
-    bad_member = check_archive_integrity(local_path)
-    if bad_member is not None:
-        result.findings.append(
-            _finding(
-                rule_id="bronze.corrupt_member",
-                severity=Severity.ERROR,
-                source_system=manifest_entry.source,
-                source_record_locator=f"{locator}!{bad_member}",
-                message="archive member failed its CRC check",
-            )
+    with zipfile.ZipFile(io.BytesIO(data)) as zf: #checking if the file name matches the documented pattern
+        for member in csv_members:
+            if not SYNDROME_CSV_PATTERN.match(member):
+                raise BronzeError(
+                    f"qec_syndromes file name does not match the documented "
+                    f"pattern: {member}"
+                )
+            header = zf.read(member).split(b"\n", 1)[0].decode("utf-8").strip() #reading the first line
+            if header != SYNDROME_CSV_HEADER: #confirms if the header matches exactly
+                raise BronzeError(
+                    f"{member}: header {header!r} does not match the "
+                    f"documented header {SYNDROME_CSV_HEADER!r}"
+                )
+
+#verification of the files in the google QEC shot datasets
+GOOGLE_DIR_PATTERN = re.compile(r"^surface_code_bX_d(\d+)_r\d+_center_\d+_\d+$") #capturing the d value (distance digit)
+GOOGLE_EXPECTED_D3_COUNT = 4 #there are exactly 4 distance experiments mentioned 
+GOOGLE_EXPECTED_D5_COUNT = 1 # exactly 1 distance-5 experiment folder expected
+
+GOOGLE_REQUIRED_COMPANIONS = (  # listing every file that must exist inside each experiment folder
+    "properties.yml",
+    "measurements.b8",
+    "sweep.b8",
+    "detection_events.b8",
+    "obs_flips_actual.01",
+    "obs_flips_predicted_by_belief_matching.01",
+    "obs_flips_predicted_by_correlated_matching.01",
+    "obs_flips_predicted_by_pymatching.01",
+    "obs_flips_predicted_by_tensor_network_contraction.01",
+    "circuit_ideal.stim",
+    "circuit_noisy.stim",
+    "circuit_detector_error_model.dem",
+    "layout.svg",
+    "pij_from_even_for_odd.dem",
+    "pij_from_odd_for_even.dem",
+)
+
+
+def _check_google_structure(members: list[str]) -> None:
+    """Confirm google_qec has exactly 4 distance-3 + 1 distance-5 experiment
+    directories, each with every required companion file."""
+    experiment_dirs = sorted({m.split("/", 1)[0] for m in members if "/" in m})
+
+    d3_dirs = [] #this will hold all the files with distance d = 3
+    d5_dirs = [] #this will hold all the files with distance d = 5
+    for name in experiment_dirs:
+        match = GOOGLE_DIR_PATTERN.match(name) #extracting the digit from the folder name
+        if not match:
+            raise BronzeError(f"google_qec directory name is not in the documented format: {name}")
+        distance = match.group(1) # pull out the captured distance number
+        if distance == "3": #if the distance value is 3
+            d3_dirs.append(name)  #add it to the list of the d3_dirs
+        elif distance == "5": #else if distance value is 5
+            d5_dirs.append(name) #add it to the list of the d5_dirs
+        else: #if none of the extracted digit matches to 3 or 5 -> raise the BronzeError 
+            raise BronzeError(f"google_qec directory has an unexpected distance value: {name}")
+
+    if len(d3_dirs) != GOOGLE_EXPECTED_D3_COUNT or len(d5_dirs) != GOOGLE_EXPECTED_D5_COUNT: #if none of the file count matches the expected count (for both d3 or d5) -> raise the BronzeError
+        raise BronzeError(
+            f"expected {GOOGLE_EXPECTED_D3_COUNT} distance-3 and {GOOGLE_EXPECTED_D5_COUNT} "
+            f"distance-5 directories, found {len(d3_dirs)} distance-3 and {len(d5_dirs)} distance-5"
         )
 
-    if not any(f.severity is Severity.ERROR for f in result.findings):
-        result.records.append(
-            BronzeObjectRecord(
-                source=manifest_entry.source,
-                object_path=manifest_entry.path,
-                bytes=actual_bytes,
-                sha256=actual_sha256,
-                member_count=sum(1 for member in members if not member["is_dir"]),
-                mandatory=manifest_entry.mandatory,
+    member_set = set(members) # Convert to a set for fast "is this path present" checks
+    for experiment_dir in experiment_dirs: # find any required companion file that's absent from this folder
+        missing = [
+            name for name in GOOGLE_REQUIRED_COMPANIONS
+            if f"{experiment_dir}/{name}" not in member_set
+        ]
+        if missing: #will raise the BronzeError if any companion file is missing 
+            raise BronzeError(
+                f"google_qec experiment {experiment_dir!r} is missing required companion file(s): {missing}"
             )
+
+#Now building the QASM structural check 
+QASMBENCH_CIRCUITS = ("error_correctiond3_n5", "qec_en_n5", "qec_sm_n5") #contains the documented circuit names
+
+
+def _check_qasmbench_structure(members: list[str]) -> None:
+    """Confirm qasmbench has exactly the 3 documented circuits, each with
+    both its source and transpiled QASM variant, and no extra circuit directories."""
+    member_set = set(members) #using set for fast lookup 
+
+    for circuit in QASMBENCH_CIRCUITS:
+        for variant in (f"{circuit}.qasm", f"{circuit}_transpiled.qasm"):
+            path = f"small/{circuit}/{variant}"
+            if path not in member_set:
+                raise BronzeError(f"qasmbench is missing required circuit file: {path}")
+
+    actual_circuit_dirs = sorted({ # list every actual circuit-folder name found in the archive
+        m.split("/")[1] for m in members
+        if m.startswith("small/") and m.count("/") >= 2
+    })
+    expected_circuit_dirs = sorted(QASMBENCH_CIRCUITS) #the exact set we expect to see
+    if actual_circuit_dirs != expected_circuit_dirs: #comparing the 2 sets 
+        extra = set(actual_circuit_dirs) - set(expected_circuit_dirs) 
+        missing = set(expected_circuit_dirs) - set(actual_circuit_dirs)
+        raise BronzeError(
+            f"qasmbench circuit directories do not match exactly — "
+            f"extra: {sorted(extra) or 'none'}, missing: {sorted(missing) or 'none'}"
         )
+        
+# run function is the main entry point of the pipeline where the code written will tie every function together
+def run(run_id: str) -> StageResult:
+    """Verify and register the three mandatory Bronze source objects."""
+    settings = Settings.from_environment() #loading connection config from environment variables 
+    result = StageResult(stage="register_sources", run_id=run_id) # start tracking this run's outcome
+
+    # ADDED: list what's actually sitting in Bronze right now, so we can both
+    # (a) confirm each mandatory object truly exists before fetching it, and
+    # (b) report any *unexpected* extra object the manifest doesn't mention —
+    # this closes the "report missing or unexpected source objects" line
+    # from the module docstring, which previously only covered "missing".
+    inventory = dict(bronze_inventory(settings))
+
+    manifest = _load_manifest() #read the expected-objects manifest
+    mandatory_objects = [obj for obj in manifest["objects"] if obj["mandatory"]] # keep only the required ones
+    result.input_count = len(mandatory_objects)  # record how many objects we expect to process
+
+    registrations: list[dict] = [] #collecting one summary dict per verified object
+    expected_names: set[str] = set()  # ADDED: every Bronze key the manifest says should exist
+
+    for obj in mandatory_objects:
+        expected_names.add(_bronze_key(obj["path"]))  # ADDED: track expected key for the unexpected-object diff below
+        object_name, data = _verify_object(settings, obj, inventory)
+        members = _check_archive_safety(object_name, data)
+
+        #routing to the correct file based on the source name 
+        if obj["source"] == "qec_syndromes":
+            _check_syndrome_structure(data, members)
+        elif obj["source"] == "google_qec":
+            _check_google_structure(members)
+        elif obj["source"] == "qasmbench":
+            _check_qasmbench_structure(members)
+
+        registrations.append({ # record this object's verification summary
+            "source_name": obj["source"],
+            "bronze_object": object_name,
+            "input_sha256": obj["sha256"],
+            "size_bytes": len(data),
+            "member_count": len(members),
+        })
+
+    # ADDED: report (but don't fail on) any Bronze object present that the
+    # manifest doesn't mandate — an extra object doesn't corrupt a mandatory
+    # one, so this is a warning rather than a BronzeError.
+    unexpected = sorted(set(inventory) - expected_names)
+    if unexpected:
+        print(f"WARNING: unexpected Bronze objects present: {unexpected}")
+
+    result.output_count = len(registrations)  # how many objects were successfully verified
+    result.issue_count = len(unexpected)  # ADDED: unexpected objects counted as issues, not silently ignored
+    result.finish()  # mark the finish timestamp on the result
+
+    RESULTS_PART1.mkdir(parents=True, exist_ok=True)  # ensure the results folder exists before writing to it
+
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "register_sources",
+        payload={ # this stage's contribution to the shared run record
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": result.started_at.isoformat(),
+            "finished_at": result.finished_at.isoformat(),
+            "input_count": result.input_count,
+            "output_count": result.output_count,
+            "issue_count": result.issue_count,
+            "input_hashes": {
+                r["source_name"]: r["input_sha256"] for r in registrations
+            },
+            "unexpected_bronze_objects": unexpected,  # ADDED: surface exactly what was unexpected, not just the count
+        },
+    )
+
+    merge_json_file(
+        RESULTS_PART1 / "row_counts.json",
+        "register_sources",
+        payload={ # this stage's contribution to the shared row-count record
+            "read": result.input_count,
+            "accepted": result.output_count,
+            "rejected": result.issue_count,
+            "objects": {
+                r["source_name"]: {
+                    "member_count": r["member_count"],
+                    "size_bytes": r["size_bytes"],
+                }
+                for r in registrations
+            },
+        },
+    )
+
     return result
-
-
-# --------------------------------------------------------------------------
-# Missing / unexpected object inventory
-# --------------------------------------------------------------------------
-
-
-def discover_actual_objects(raw_root: Path) -> dict[str, Path]:
-    """Every file found under the raw Bronze root, keyed by its
-    manifest-relative path (``raw/<...>``)."""
-    return {
-        "raw/" + path.relative_to(raw_root).as_posix(): path
-        for path in sorted(raw_root.rglob("*"))
-        if path.is_file()
-    }
-
-
-def check_unexpected_objects(
-    manifest: list[ManifestObject], actual: dict[str, Path]
-) -> list[QualityFinding]:
-    """Flag files present under the raw Bronze root that the release
-    manifest does not declare (leftover local artifacts, OS junk files,
-    accidental copies, etc.)."""
-    declared_paths = {entry.path for entry in manifest}
-    return [
-        _finding(
-            rule_id="bronze.unexpected_object",
-            severity=Severity.WARNING,
-            source_system="bronze",
-            source_record_locator=path,
-            message="file present under the raw Bronze root is not declared in the release manifest",
-        )
-        for path in sorted(actual)
-        if path not in declared_paths
-    ]
-
-
-# --------------------------------------------------------------------------
-# Orchestration
-# --------------------------------------------------------------------------
-
-
-def register_bronze_sources(bundle_root: Path) -> BronzeVerificationResult:
-    """Verify and register every Bronze object under one course-bundle root
-    (a directory containing ``raw/`` and ``metadata/``)."""
-    manifest = load_release_manifest(bundle_root / "metadata")
-    actual_objects = discover_actual_objects(bundle_root / "raw")
-
-    result = BronzeVerificationResult(objects_declared=len(manifest))
-    result.findings.extend(check_unexpected_objects(manifest, actual_objects))
-    for entry in manifest:
-        result.merge(verify_bronze_object(bundle_root / entry.path, entry))
-    return result
-
-
-def _default_bundle_root() -> Path:
-    env_root = os.environ.get("QEC_BUNDLE_ROOT")
-    if env_root:
-        return Path(env_root)
-    docker_mount = Path("/course-data")
-    if docker_mount.exists():
-        return docker_mount
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "datasets" / "student-bundle" / "core"
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        "Could not locate the course data bundle (needs raw/ and metadata/); "
-        "pass --bundle-root explicitly or set QEC_BUNDLE_ROOT."
-    )
-
-
-# --------------------------------------------------------------------------
-# Result evidence: results/part1/data_issues.parquet + bronze_inventory.json
-# --------------------------------------------------------------------------
-
-_ISSUE_FIELDS = [
-    "rule_id",
-    "severity",
-    "source_system",
-    "source_record_locator",
-    "message",
-    "observed_value",
-]
-
-
-def _findings_to_rows(findings: list[QualityFinding]) -> list[dict[str, Any]]:
-    return [
-        {
-            "rule_id": finding.rule_id,
-            "severity": finding.severity.value,
-            "source_system": finding.source_system,
-            "source_record_locator": finding.source_record_locator,
-            "message": finding.message,
-            "observed_value": finding.observed_value,
-        }
-        for finding in findings
-    ]
-
-
-def write_data_issues(rows: list[dict[str, Any]], output_path: Path) -> Path:
-    """Write ``data_issues.parquet``.
-
-    Falls back to a same-named ``.csv`` file if pandas/pyarrow are not
-    installed in the current interpreter (they are declared dependencies
-    of this project and available in the course's Docker image).
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import pandas as pd
-
-        pd.DataFrame(rows, columns=_ISSUE_FIELDS).to_parquet(output_path, index=False)
-        return output_path
-    except ImportError:
-        fallback = output_path.with_suffix(".csv")
-        with fallback.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=_ISSUE_FIELDS)
-            writer.writeheader()
-            writer.writerows(rows)
-        return fallback
-
-
-def write_bronze_inventory(result: BronzeVerificationResult, output_path: Path) -> Path:
-    """Write the stable per-object registration records plus a summary."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "summary": result.summary(),
-        "objects": [
-            {
-                "source": record.source,
-                "object_path": record.object_path,
-                "bytes": record.bytes,
-                "sha256": record.sha256,
-                "member_count": record.member_count,
-                "mandatory": record.mandatory,
-            }
-            for record in result.records
-        ],
-    }
-    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return output_path
-
-
-def _execute(bundle_root: Path, out_dir: Path) -> tuple[BronzeVerificationResult, Path, Path]:
-    result = register_bronze_sources(bundle_root)
-    issues_path = write_data_issues(_findings_to_rows(result.findings), out_dir / "data_issues.parquet")
-    inventory_path = write_bronze_inventory(result, out_dir / "bronze_inventory.json")
-    return result, issues_path, inventory_path
-
-
-def run(
-    run_id: str, *, bundle_root: Path | None = None, results_dir: Path | None = None
-) -> StageResult:
-    """Stage entry point: verify and register the Bronze sources.
-
-    Matches the ``run(run_id) -> StageResult`` convention used by the
-    other stage modules in this package.
-    """
-    stage_result = StageResult(stage="register_sources", run_id=run_id)
-    root = bundle_root or _default_bundle_root()
-    out_dir = results_dir or Path(__file__).resolve().parents[3] / "results" / "part1"
-
-    result, _issues_path, _inventory_path = _execute(root, out_dir)
-
-    stage_result.input_count = result.objects_declared
-    stage_result.output_count = len(result.records)
-    stage_result.issue_count = len(result.findings)
-    stage_result.finish()
-    return stage_result
-
-
-def _print_summary(result: BronzeVerificationResult) -> None:
-    # pyrefly: ignore [missing-import]
-    from rich.console import Console
-    # pyrefly: ignore [missing-import]
-    from rich.table import Table
-
-    console = Console()
-    table = Table(title="Bronze source verification")
-    table.add_column("Source")
-    table.add_column("Object")
-    table.add_column("Bytes", justify="right")
-    table.add_column("SHA-256 (first 12)")
-    table.add_column("Members", justify="right")
-    for record in result.records:
-        table.add_row(
-            record.source,
-            record.object_path,
-            f"{record.bytes:,}",
-            record.sha256[:12],
-            str(record.member_count),
-        )
-    console.print(table)
-    console.print(
-        f"Declared objects: {result.objects_declared}  "
-        f"Verified: {len(result.records)}  Issues: {len(result.findings)}"
-    )
-    by_rule = Counter(f.rule_id for f in result.findings)
-    if by_rule:
-        console.print(f"Issues by rule: {dict(by_rule)}")
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--bundle-root",
-        type=Path,
-        default=None,
-        help="Directory containing raw/ and metadata/ (defaults to the course layout)",
-    )
-    parser.add_argument(
-        "--results-dir",
-        type=Path,
-        default=None,
-        help="Where to write data_issues.parquet/bronze_inventory.json (defaults to results/part1)",
-    )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
-    root = args.bundle_root or _default_bundle_root()
-    out_dir = args.results_dir or Path(__file__).resolve().parents[3] / "results" / "part1"
-
-    result, issues_path, inventory_path = _execute(root, out_dir)
-    _print_summary(result)
-    print(f"\nWrote {issues_path}")
-    print(f"Wrote {inventory_path}")
-
-    has_errors = any(f.severity is Severity.ERROR for f in result.findings)
-    return 1 if has_errors else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
