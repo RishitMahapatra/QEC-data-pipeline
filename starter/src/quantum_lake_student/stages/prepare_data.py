@@ -138,7 +138,18 @@ def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
 
             with archive.open(member) as fh:
                 text = io.TextIOWrapper(fh, encoding="utf-8")
-                header = next(text).strip()
+                try:
+                    header = next(text).strip()
+                except StopIteration:
+                    issues.append(DataIssue(
+                        source_record_id=None,
+                        rule_id="syndromes.empty_file",
+                        severity="error",
+                        observed_value=member,
+                        action="file_skipped",
+                        reason="file is empty (no header row)",
+                    ))
+                    continue
                 if header != SYNDROMES_EXPECTED_HEADER:
                     issues.append(DataIssue(
                         source_record_id=None,
@@ -146,7 +157,7 @@ def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
                         severity="error",
                         observed_value=header,
                         action="file_skipped",
-                        reason=f"expected header '{SYNDROMES_EXPECTED_HEADER}'",
+                        reason=f"{member}: expected header '{SYNDROMES_EXPECTED_HEADER}'",
                     ))
                     continue
 
@@ -156,12 +167,6 @@ def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
                     line = line.rstrip("\n")
                     if not line:
                         continue
-                    # quantity is the last comma field; syndromes is quoted and
-                    # may itself contain commas, so split from the right
-                    label_str, rest = line.split(",", 1)
-                    syndromes_str, quantity_str = rest.rsplit(",", 1)
-                    syndromes_str = syndromes_str.strip('"')
-
                     # records a trace entry for the row
                     record_id = _syndromes_record_id(member, row_index)
                     trace_rows.append(TraceRow(
@@ -172,6 +177,23 @@ def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
                         record_locator=str(row_index),
                         input_sha256=input_sha256,
                     ))
+
+                    # quantity is the last comma field; syndromes is quoted and
+                    # may itself contain commas, so split from the right
+                    try:
+                        label_str, rest = line.split(",", 1)
+                        syndromes_str, quantity_str = rest.rsplit(",", 1)
+                    except ValueError:
+                        issues.append(DataIssue(
+                            source_record_id=record_id,
+                            rule_id="syndromes.row_format",
+                            severity="error",
+                            observed_value=line,
+                            action="row_excluded",
+                            reason="row does not have the expected label,syndromes,quantity format",
+                        ))
+                        continue
+                    syndromes_str = syndromes_str.strip('"')
 
                     # runs the validity checks
                     rounds = _syndromes_parse_bits(syndromes_str)
@@ -255,6 +277,13 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _issue_id(issue: DataIssue) -> str:
+    # hash of the issue's own content, not its position in the list: a rerun
+    # that finds the same problem (in any order) gets the same issue_id
+    key = f"{issue.rule_id}:{issue.source_record_id or ''}:{issue.observed_value}:{issue.reason}"
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
 def run(run_id: str) -> StageResult:
     settings = Settings.from_environment()
     client = minio_client(settings)
@@ -285,7 +314,7 @@ def run(run_id: str) -> StageResult:
     # overwritten wholesale each run
     issues_table = pa.Table.from_pylist([
         {
-            "issue_id": f"{issue.rule_id}:{issue.source_record_id or 'file'}:{n}",
+            "issue_id": _issue_id(issue),
             "run_id": run_id,
             "source_record_id": issue.source_record_id,
             "rule_id": issue.rule_id,
@@ -294,7 +323,7 @@ def run(run_id: str) -> StageResult:
             "action": issue.action,
             "reason": issue.reason,
         }
-        for n, issue in enumerate(all_issues)
+        for issue in all_issues
     ])
     pq.write_table(issues_table, RESULTS_PART1 / "data_issues.parquet")
 

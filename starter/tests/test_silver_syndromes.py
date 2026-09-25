@@ -96,6 +96,75 @@ def test_same_syndrome_both_labels_are_both_kept():
     assert bit_values[0] == bit_values[1]
 
 
+def test_row_missing_commas_is_rejected_not_raised():
+    truncated_row = "not a real row\n"
+    data = _zip_bytes({"d-3_pfr-0.000010_nb-10M.csv": _syndrome_csv(GOOD_ROW, truncated_row)})
+
+    table, issues, _ = pd.build_syndromes(data, input_sha256=sha256(data).hexdigest())
+
+    assert table.num_rows == 1
+    format_issues = [i for i in issues if i.rule_id == "syndromes.row_format"]
+    assert len(format_issues) == 1
+    assert format_issues[0].action == "row_excluded"
+    assert format_issues[0].observed_value == truncated_row.rstrip("\n")
+
+
+def test_row_with_only_one_comma_is_rejected_not_raised():
+    one_comma_row = "0,not enough fields\n"
+    data = _zip_bytes({"d-3_pfr-0.000010_nb-10M.csv": _syndrome_csv(GOOD_ROW, one_comma_row)})
+
+    table, issues, _ = pd.build_syndromes(data, input_sha256=sha256(data).hexdigest())
+
+    assert table.num_rows == 1
+    format_issues = [i for i in issues if i.rule_id == "syndromes.row_format"]
+    assert len(format_issues) == 1
+
+
+def test_empty_file_is_flagged_not_raised():
+    data = _zip_bytes({"d-3_pfr-0.000010_nb-10M.csv": ""})
+
+    table, issues, trace_rows = pd.build_syndromes(data, input_sha256=sha256(data).hexdigest())
+
+    assert table.num_rows == 0
+    assert trace_rows == []
+    empty_file_issues = [i for i in issues if i.rule_id == "syndromes.empty_file"]
+    assert len(empty_file_issues) == 1
+    assert empty_file_issues[0].action == "file_skipped"
+
+
+def test_issue_id_is_stable_regardless_of_list_position():
+    issue = pd.DataIssue(
+        source_record_id=None,
+        rule_id="syndromes.header",
+        severity="error",
+        observed_value="bad,header",
+        action="file_skipped",
+        reason="d-3_pfr-0.000010_nb-10M.csv: expected header 'labels,syndromes,quantity'",
+    )
+    # same issue content -> same id whether it's first or fifth in the list
+    assert pd._issue_id(issue) == pd._issue_id(issue)
+
+
+def test_issue_id_differs_for_the_same_rule_on_different_files():
+    first = pd.DataIssue(
+        source_record_id=None,
+        rule_id="syndromes.header",
+        severity="error",
+        observed_value="bad,header",
+        action="file_skipped",
+        reason="d-3_pfr-0.000010_nb-10M.csv: expected header 'labels,syndromes,quantity'",
+    )
+    second = pd.DataIssue(
+        source_record_id=None,
+        rule_id="syndromes.header",
+        severity="error",
+        observed_value="bad,header",
+        action="file_skipped",
+        reason="d-3_pfr-0.000050_nb-10M.csv: expected header 'labels,syndromes,quantity'",
+    )
+    assert pd._issue_id(first) != pd._issue_id(second)
+
+
 def test_accepted_quantity_reconciles_to_filename_hint_on_real_bronze_zip():
     settings = Settings.from_environment()
     try:
