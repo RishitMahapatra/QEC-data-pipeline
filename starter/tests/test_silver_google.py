@@ -383,7 +383,7 @@ def test_run_writes_silver_tables_and_results(tmp_path, monkeypatch) -> None:
     circuit = pq.read_table(lake / "silver/qasmbench/circuit.parquet")
     assert circuit.num_rows == 1
     qasmbench_counts = json.loads((results / "row_counts.json").read_text())["prepare_data"]["qasmbench"]
-    assert qasmbench_counts == {"read": 1, "accepted": 1, "rejected": 0}
+    assert qasmbench_counts["circuit"] == {"read": 1, "accepted": 1, "rejected": 0}
 
     # google_qec (1 experiment + 4 shots) + qec_syndromes (1 row) + qasmbench (1 circuit)
     assert (result.stage, result.input_count, result.output_count, result.issue_count) == ("prepare_data", 7, 7, 0)

@@ -535,7 +535,13 @@ _CORRECTION_SCHEMA = pa.schema(
 
 
 def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
-    """Parse the QASMBench Bronze archive into the three QASMBench Silver tables."""
+    """Parse the QASMBench Bronze archive into the three QASMBench Silver tables.
+
+    One .qasm member is one circuit variant. A member that cannot be decoded or
+    parsed is recorded in data_issues and contributes no rows to any table (a
+    circuit is published whole or not at all). Also records this source's
+    per-table counts in row_counts.json and its run facts in run.json.
+    """
     result = StageResult(stage="prepare_data:qasmbench", run_id=run_id)
 
     archive_bytes = _read_bronze_object(settings, BRONZE_OBJECT)
@@ -551,18 +557,16 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
         members = sorted(name for name in archive.namelist() if name.endswith(".qasm"))
         for member in members:
             result.input_count += 1
-            text = archive.read(member).decode("utf-8")
+            # every member read gets a trace row, so a rejected circuit's issue
+            # row can be traced back to Bronze just like an accepted one
+            trace_rows.append(
+                _trace_row(_circuit_source_record_id(member), member, member, input_sha256)
+            )
             try:
-                _process_member(
-                    member=member,
-                    text=text,
-                    input_sha256=input_sha256,
-                    circuit_rows=circuit_rows,
-                    stabilizer_rows=stabilizer_rows,
-                    correction_rows=correction_rows,
-                    trace_rows=trace_rows,
-                )
+                text = archive.read(member).decode("utf-8")
+                parsed = _process_member(member=member, text=text, input_sha256=input_sha256)
             except (ValueError, KeyError, QASM2ParseError) as error:
+                # UnicodeDecodeError is a ValueError, so undecodable files land here too
                 issues.append(
                     QualityFinding(
                         rule_id="qasmbench.parse_failed",
@@ -570,8 +574,14 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
                         source_system=SOURCE_NAME,
                         source_record_locator=member,
                         message=str(error),
+                        observed_value=member,
                     )
                 )
+                continue
+            circuit_rows.append(parsed.circuit)
+            stabilizer_rows.extend(parsed.stabilizer_checks)
+            correction_rows.extend(parsed.corrections)
+            trace_rows.extend(parsed.trace)
 
     result.output_count = len(circuit_rows) + len(stabilizer_rows) + len(correction_rows)
     result.issue_count = len(issues)
@@ -602,19 +612,61 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
     )
 
     result.finish()
+
+    # stabilizer checks and corrections are derived from accepted circuits
+    # only, so a rejected member removes its rows from all three tables at once
+    rejected_members = len(issues)
+    merge_json_file(
+        RESULTS_PART1 / "row_counts.json",
+        "prepare_data",
+        SOURCE_NAME,
+        payload={
+            "circuit": {
+                "read": result.input_count,
+                "accepted": len(circuit_rows),
+                "rejected": rejected_members,
+            },
+            "stabilizer_check": {"accepted": len(stabilizer_rows)},
+            "conditional_correction": {"accepted": len(correction_rows)},
+            "trace_rows": len(trace_rows),
+        },
+    )
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "prepare_data",
+        SOURCE_NAME,
+        payload={
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": result.started_at.isoformat(),
+            "finished_at": result.finished_at.isoformat(),
+            "input_hashes": {SOURCE_NAME: input_sha256},
+            "output_row_counts": {
+                "silver/qasmbench/circuit.parquet": len(circuit_rows),
+                "silver/qasmbench/stabilizer_check.parquet": len(stabilizer_rows),
+                "silver/qasmbench/conditional_correction.parquet": len(correction_rows),
+                "results/part1/source_trace.parquet (qasmbench rows)": len(trace_rows),
+                "results/part1/data_issues.parquet (qasmbench rows)": len(issues),
+            },
+        },
+    )
     return result
 
 
-def _process_member(
-    *,
-    member: str,
-    text: str,
-    input_sha256: str,
-    circuit_rows: list[dict[str, Any]],
-    stabilizer_rows: list[dict[str, Any]],
-    correction_rows: list[dict[str, Any]],
-    trace_rows: list[dict[str, Any]],
-) -> None:
+@dataclass
+class _ParsedCircuit:
+    # all rows produced by one .qasm member; published together or not at all
+    circuit: dict[str, Any]
+    stabilizer_checks: list[dict[str, Any]]
+    corrections: list[dict[str, Any]]
+    trace: list[dict[str, Any]]
+
+
+def _circuit_source_record_id(member: str) -> str:
+    return f"qasmbench:{member}"
+
+
+def _process_member(*, member: str, text: str, input_sha256: str) -> _ParsedCircuit:
     parts = member.split("/")
     benchmark_name = parts[-2]
     variant = "transpiled" if parts[-1].endswith("_transpiled.qasm") else "source"
@@ -622,12 +674,12 @@ def _process_member(
     circuit = qasm2.loads(text, custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
     expanded = _expand_custom_gates(circuit)
 
-    circuit_source_record_id = f"qasmbench:{member}"
+    circuit_source_record_id = _circuit_source_record_id(member)
     circuit_id = f"{benchmark_name}:{variant}"
     measurement_count, two_qubit_gate_count = _circuit_counts(expanded)
 
-    circuit_rows.append(
-        {
+    parsed = _ParsedCircuit(
+        circuit={
             "source_record_id": circuit_source_record_id,
             "circuit_id": circuit_id,
             "benchmark_name": benchmark_name,
@@ -636,14 +688,16 @@ def _process_member(
             "qubit_count": sum(register.size for register in circuit.qregs),
             "measurement_count": measurement_count,
             "two_qubit_gate_count": two_qubit_gate_count,
-        }
+        },
+        stabilizer_checks=[],
+        corrections=[],
+        trace=[],
     )
-    trace_rows.append(_trace_row(circuit_source_record_id, member, member, input_sha256))
 
     for ancilla_qubit, data_qubits, syndrome_bit, occurrence in _find_stabilizer_checks(expanded):
         check_id = f"{ancilla_qubit}#{occurrence}"
         source_record_id = f"{circuit_source_record_id}::stabilizer::{check_id}"
-        stabilizer_rows.append(
+        parsed.stabilizer_checks.append(
             {
                 "source_record_id": source_record_id,
                 "circuit_id": circuit_id,
@@ -653,7 +707,7 @@ def _process_member(
                 "syndrome_bit": syndrome_bit,
             }
         )
-        trace_rows.append(
+        parsed.trace.append(
             _trace_row(source_record_id, member, f"{member}#check:{check_id}", input_sha256)
         )
 
@@ -661,7 +715,7 @@ def _process_member(
         _find_conditional_corrections(expanded)
     ):
         source_record_id = f"{circuit_source_record_id}::correction::{index}"
-        correction_rows.append(
+        parsed.corrections.append(
             {
                 "source_record_id": source_record_id,
                 "circuit_id": circuit_id,
@@ -671,7 +725,7 @@ def _process_member(
                 "target_qubit": target_qubit,
             }
         )
-        trace_rows.append(
+        parsed.trace.append(
             _trace_row(
                 source_record_id,
                 member,
@@ -679,6 +733,8 @@ def _process_member(
                 input_sha256,
             )
         )
+
+    return parsed
 
 
 def _expand_custom_gates(circuit: QuantumCircuit) -> QuantumCircuit:
@@ -805,9 +861,12 @@ def _trace_row(source_record_id: str, archive_member: str, record_locator: str, 
 
 def _issue_row(run_id: str, finding: QualityFinding) -> dict[str, Any]:
     return {
-        "issue_id": f"{run_id}:{finding.rule_id}:{finding.source_record_locator}",
+        # content hash, not run_id: a rerun on unchanged input gives the same id
+        "issue_id": stable_record_hash(
+            [finding.rule_id, finding.source_record_locator, finding.message]
+        )[:32],
         "run_id": run_id,
-        "source_record_id": None,
+        "source_record_id": _circuit_source_record_id(finding.source_record_locator),
         "rule_id": finding.rule_id,
         "severity": finding.severity.value,
         "observed_value": finding.observed_value,
@@ -1221,29 +1280,7 @@ def run(run_id: str) -> StageResult:
         },
     )
 
-    merge_json_file(
-        RESULTS_PART1 / "row_counts.json",
-        "prepare_data",
-        SOURCE_NAME,
-        payload={
-            "read": qasmbench_result.input_count,
-            "accepted": qasmbench_result.output_count,
-            "rejected": qasmbench_result.issue_count,
-        },
-    )
-    merge_json_file(
-        RESULTS_PART1 / "run.json",
-        "prepare_data",
-        SOURCE_NAME,
-        payload={
-            "run_id": run_id,
-            "code_revision": code_revision(),
-            "started_at": qasmbench_result.started_at.isoformat(),
-            "finished_at": qasmbench_result.finished_at.isoformat(),
-            "output_row_counts": {
-                "silver/qasmbench/circuit.parquet": qasmbench_result.output_count,
-            },
-        },
-    )
+    # qasmbench row_counts.json / run.json entries are written by
+    # prepare_qasmbench_silver itself, which has the per-table counts
 
     return result
