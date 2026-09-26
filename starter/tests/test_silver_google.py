@@ -1,8 +1,4 @@
-"""Tests for the google_qec part of the Silver stage (prepare_data.py).
-
-They build tiny in-memory archives shaped like the real one (4 shots, 10
-measurement bits, 9 sweep bits, 8 detector bits), so they need no platform.
-"""
+"""Tests for the Silver prepare_data stage: google_qec."""
 
 from __future__ import annotations
 
@@ -18,6 +14,7 @@ import yaml
 from quantum_lake_student.config import Settings
 from quantum_lake_student.formats import iter_b8_records
 from quantum_lake_student.stages import prepare_data as prep
+
 
 EXP = "surface_code_bX_d3_r25_center_3_5"
 PROPS = {

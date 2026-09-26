@@ -12,7 +12,7 @@ This folder holds everything you need to run the assignment locally:
 
 You need Docker and Make installed, and a Bash-compatible terminal.
 
-**Windows users:** PowerShell won't work with these commands. Install WSL 2 with Ubuntu, enable Docker Desktop's WSL integration, and run everything from the Ubuntu terminal instead. See the [Windows setup steps](#) for details.
+**Windows users:** PowerShell won't work with these commands. Install WSL 2 with Ubuntu, enable Docker Desktop's WSL integration, and run everything from the Ubuntu terminal instead. See the [Windows setup steps](assignment/getting-started.md#windows-use-wsl-bash-not-powershell) for details.
 
 ## Getting it running
 
@@ -27,3 +27,4 @@ Run `make help` any time to see other commands — checking status, resetting th
 
 - Assignment instructions: `assignment/README.md`
 - Your actual coding workspace: `starter/README.md`
+
