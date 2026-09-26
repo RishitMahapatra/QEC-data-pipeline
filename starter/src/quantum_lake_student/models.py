@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime, timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+    class StrEnum(str, Enum):
+        pass
+
+import subprocess
 from pathlib import Path
 from typing import Any
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]  # walk up from this file's location to the project root
-RESULTS_PART1 = _PROJECT_ROOT / "results" / "part1"  # the folder where all Part I evidence files live
+RESULTS_PART1 = Path("results/part1")  # the folder where all Part I evidence files live
 
 
 def code_revision() -> str:
