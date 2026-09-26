@@ -446,6 +446,45 @@ def merge_results_parquet(
     _replace_file(path, buffer.getvalue())
 
 
+def _read_bronze_object(settings: Settings, object_name: str) -> bytes:
+    if settings.lake_backend == "local":
+        for root_name in ("bronze", "raw"):
+            candidate = settings.local_lake_root / object_name.replace("bronze/", f"{root_name}/", 1)
+            if candidate.exists():
+                return candidate.read_bytes()
+        raise FileNotFoundError(f"Bronze object not found under {settings.local_lake_root}: {object_name}")
+    client = minio_client(settings)
+    response = client.get_object(settings.s3_bucket, object_name)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def _write_lake_object(settings: Settings, object_name: str, payload: bytes) -> None:
+    if settings.lake_backend == "local":
+        path = settings.local_lake_root / object_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return
+    client = minio_client(settings)
+    client.put_object(
+        settings.s3_bucket,
+        object_name,
+        data=BytesIO(payload),
+        length=len(payload),
+        content_type="application/octet-stream",
+    )
+
+
+def _write_lake_parquet(
+    settings: Settings, object_name: str, rows: list[dict[str, Any]], schema: pa.Schema
+) -> None:
+    table = pa.Table.from_pylist(rows, schema=schema)
+    buffer = BytesIO()
+    pq.write_table(table, buffer)
+    _write_lake_object(settings, object_name, buffer.getvalue())
 
 
 # ---------------------------------------------------------------------------
@@ -491,31 +530,6 @@ _CORRECTION_SCHEMA = pa.schema(
         ("condition_value", pa.int64()),
         ("gate", pa.string()),
         ("target_qubit", pa.string()),
-    ]
-)
-
-_QASM_TRACE_SCHEMA = pa.schema(
-    [
-        ("source_record_id", pa.string()),
-        ("source_name", pa.string()),
-        ("bronze_object", pa.string()),
-        ("archive_member", pa.string()),
-        ("record_locator", pa.string()),
-        ("input_sha256", pa.string()),
-    ]
-)
-
-_QASM_ISSUE_SCHEMA = pa.schema(
-    [
-        ("issue_id", pa.string()),
-        ("run_id", pa.string()),
-        ("source_name", pa.string()),
-        ("source_record_id", pa.string()),
-        ("rule_id", pa.string()),
-        ("severity", pa.string()),
-        ("observed_value", pa.string()),
-        ("action", pa.string()),
-        ("reason", pa.string()),
     ]
 )
 
@@ -573,14 +587,18 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
         _CORRECTION_SCHEMA,
     )
 
-    _merge_source_rows_into(
-        RESULTS_PART1 / "source_trace.parquet", _QASM_TRACE_SCHEMA, trace_rows, source_name_column="source_name"
+    RESULTS_PART1.mkdir(parents=True, exist_ok=True)
+    merge_results_parquet(
+        RESULTS_PART1 / "source_trace.parquet",
+        pa.Table.from_pylist(trace_rows, schema=TRACE_SCHEMA),
+        lambda table: pc.equal(table["source_name"], SOURCE_NAME),
     )
-    _merge_source_rows_into(
+    merge_results_parquet(
         RESULTS_PART1 / "data_issues.parquet",
-        _QASM_ISSUE_SCHEMA,
-        [_issue_row(run_id, finding) for finding in issues],
-        source_name_column="source_name",
+        pa.Table.from_pylist(
+            [_issue_row(run_id, finding) for finding in issues], schema=DATA_ISSUES_SCHEMA
+        ),
+        lambda table: pc.starts_with(table["rule_id"], "qasmbench."),
     )
 
     result.finish()
@@ -789,7 +807,6 @@ def _issue_row(run_id: str, finding: QualityFinding) -> dict[str, Any]:
     return {
         "issue_id": f"{run_id}:{finding.rule_id}:{finding.source_record_locator}",
         "run_id": run_id,
-        "source_name": finding.source_system,
         "source_record_id": None,
         "rule_id": finding.rule_id,
         "severity": finding.severity.value,
@@ -799,63 +816,9 @@ def _issue_row(run_id: str, finding: QualityFinding) -> dict[str, Any]:
     }
 
 
-def _read_bronze_object(settings: Settings, object_name: str) -> bytes:
-    if settings.lake_backend == "local":
-        for root_name in ("bronze", "raw"):
-            candidate = settings.local_lake_root / object_name.replace("bronze/", f"{root_name}/", 1)
-            if candidate.exists():
-                return candidate.read_bytes()
-        raise FileNotFoundError(f"Bronze object not found under {settings.local_lake_root}: {object_name}")
-    client = minio_client(settings)
-    response = client.get_object(settings.s3_bucket, object_name)
-    try:
-        return response.read()
-    finally:
-        response.close()
-        response.release_conn()
-
-
-def _write_lake_object(settings: Settings, object_name: str, payload: bytes) -> None:
-    if settings.lake_backend == "local":
-        path = settings.local_lake_root / object_name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
-        return
-    client = minio_client(settings)
-    client.put_object(
-        settings.s3_bucket,
-        object_name,
-        data=BytesIO(payload),
-        length=len(payload),
-        content_type="application/octet-stream",
-    )
-
-
-def _write_lake_parquet(
-    settings: Settings, object_name: str, rows: list[dict[str, Any]], schema: pa.Schema
-) -> None:
-    table = pa.Table.from_pylist(rows, schema=schema)
-    buffer = BytesIO()
-    pq.write_table(table, buffer)
-    _write_lake_object(settings, object_name, buffer.getvalue())
-
-
-def _merge_source_rows_into(
-    path: Path, schema: pa.Schema, new_rows: list[dict[str, Any]], *, source_name_column: str
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        existing = pq.read_table(path)
-        kept_mask = pc.not_equal(existing.column(source_name_column), SOURCE_NAME)
-        existing = existing.filter(kept_mask)
-    else:
-        existing = pa.Table.from_pylist([], schema=schema)
-    new_table = pa.Table.from_pylist(new_rows, schema=schema)
-    combined = pa.concat_tables([existing, new_table])
-    pq.write_table(combined, path)
-
-def run(run_id: str) -> StageResult:
-    """Build the Silver tables. Only google_qec is implemented so far.
+# ---------------------------------------------------------------------------
+# qec_syndromes Silver: syndrome_observation.parquet
+# ---------------------------------------------------------------------------
 
 SYNDROMES_SOURCE_NAME = "qec_syndromes"
 SYNDROMES_BRONZE_OBJECT = "bronze/source=qec_syndromes/syndromes_dataset.zip"
@@ -1071,7 +1034,7 @@ def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
                     })
 
                 # checks that the total quantity of everything kept
-                # roughly matches what the filename promised as to
+                # roughly matches what the filename promised, so as to
                 # not silently lose or duplicate anything
                 nb_hint = match.group(3)
                 if nb_hint.endswith("M"):
@@ -1093,11 +1056,6 @@ def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
     # builds one clean table from everything that passed
     table = pa.Table.from_pylist(records, schema=SYNDROMES_SILVER_SCHEMA)
     return table, issues, trace_rows
-
-
-def _sha256(data: bytes) -> str:
-    # produces an identification for the content
-    return hashlib.sha256(data).hexdigest()
 
 
 def _issue_id(issue: DataIssue) -> str:
@@ -1123,20 +1081,8 @@ def _syndromes_issue_rows(run_id: str, issues: list[DataIssue]) -> list[dict]:
     ]
 
 
-def load_syndromes_bytes(settings: Settings) -> bytes:
-    """Read the qec_syndromes Bronze zip's raw bytes."""
-    if settings.lake_backend == "local":
-        return (settings.local_lake_root / SYNDROMES_BRONZE_OBJECT).read_bytes()
-    response = minio_client(settings).get_object(settings.s3_bucket, SYNDROMES_BRONZE_OBJECT)
-    try:
-        return response.read()
-    finally:
-        response.close()
-        response.release_conn()
-
-
 def run(run_id: str) -> StageResult:
-    """Build the Silver tables for google_qec and qec_syndromes.
+    """Build the Silver tables for google_qec, qec_syndromes, and qasmbench.
 
     A google_qec check that makes an experiment unusable raises before
     anything is written for that source. A qec_syndromes row or file that
@@ -1172,8 +1118,8 @@ def run(run_id: str) -> StageResult:
     result.issue_count += len(google_silver.issues)
 
     # ---- qec_syndromes ----
-    syndromes_bytes = load_syndromes_bytes(settings)
-    syndromes_input_sha256 = _sha256(syndromes_bytes)
+    syndromes_bytes = _read_bronze_object(settings, SYNDROMES_BRONZE_OBJECT)
+    syndromes_input_sha256 = hashlib.sha256(syndromes_bytes).hexdigest()
     syndromes_table, syndromes_issues, syndromes_trace = build_syndromes(
         syndromes_bytes, input_sha256=syndromes_input_sha256
     )
@@ -1198,6 +1144,13 @@ def run(run_id: str) -> StageResult:
     result.input_count += syndromes_rows_read
     result.output_count += syndromes_table.num_rows
     result.issue_count += len(syndromes_issues)
+
+    # ---- qasmbench ----
+    qasmbench_result = prepare_qasmbench_silver(settings, run_id)
+    result.input_count += qasmbench_result.input_count
+    result.output_count += qasmbench_result.output_count
+    result.issue_count += qasmbench_result.issue_count
+
     result.finish()
 
     merge_json_file(
@@ -1261,6 +1214,31 @@ def run(run_id: str) -> StageResult:
                 SILVER_SYNDROMES_PATH: syndromes_table.num_rows,
                 "results/part1/source_trace.parquet (qec_syndromes rows)": len(syndromes_trace),
                 "results/part1/data_issues.parquet (qec_syndromes rows)": len(syndromes_issues),
+            },
+        },
+    )
+
+    merge_json_file(
+        RESULTS_PART1 / "row_counts.json",
+        "prepare_data",
+        SOURCE_NAME,
+        payload={
+            "read": qasmbench_result.input_count,
+            "accepted": qasmbench_result.output_count,
+            "rejected": qasmbench_result.issue_count,
+        },
+    )
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "prepare_data",
+        SOURCE_NAME,
+        payload={
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": qasmbench_result.started_at.isoformat(),
+            "finished_at": qasmbench_result.finished_at.isoformat(),
+            "output_row_counts": {
+                "silver/qasmbench/circuit.parquet": qasmbench_result.output_count,
             },
         },
     )
