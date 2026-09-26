@@ -8,6 +8,7 @@ data-issues output. The project README defines where generated files live.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
@@ -445,6 +446,45 @@ def merge_results_parquet(
     _replace_file(path, buffer.getvalue())
 
 
+def _read_bronze_object(settings: Settings, object_name: str) -> bytes:
+    if settings.lake_backend == "local":
+        for root_name in ("bronze", "raw"):
+            candidate = settings.local_lake_root / object_name.replace("bronze/", f"{root_name}/", 1)
+            if candidate.exists():
+                return candidate.read_bytes()
+        raise FileNotFoundError(f"Bronze object not found under {settings.local_lake_root}: {object_name}")
+    client = minio_client(settings)
+    response = client.get_object(settings.s3_bucket, object_name)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def _write_lake_object(settings: Settings, object_name: str, payload: bytes) -> None:
+    if settings.lake_backend == "local":
+        path = settings.local_lake_root / object_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return
+    client = minio_client(settings)
+    client.put_object(
+        settings.s3_bucket,
+        object_name,
+        data=BytesIO(payload),
+        length=len(payload),
+        content_type="application/octet-stream",
+    )
+
+
+def _write_lake_parquet(
+    settings: Settings, object_name: str, rows: list[dict[str, Any]], schema: pa.Schema
+) -> None:
+    table = pa.Table.from_pylist(rows, schema=schema)
+    buffer = BytesIO()
+    pq.write_table(table, buffer)
+    _write_lake_object(settings, object_name, buffer.getvalue())
 
 
 # ---------------------------------------------------------------------------
@@ -493,34 +533,15 @@ _CORRECTION_SCHEMA = pa.schema(
     ]
 )
 
-_QASM_TRACE_SCHEMA = pa.schema(
-    [
-        ("source_record_id", pa.string()),
-        ("source_name", pa.string()),
-        ("bronze_object", pa.string()),
-        ("archive_member", pa.string()),
-        ("record_locator", pa.string()),
-        ("input_sha256", pa.string()),
-    ]
-)
-
-_QASM_ISSUE_SCHEMA = pa.schema(
-    [
-        ("issue_id", pa.string()),
-        ("run_id", pa.string()),
-        ("source_name", pa.string()),
-        ("source_record_id", pa.string()),
-        ("rule_id", pa.string()),
-        ("severity", pa.string()),
-        ("observed_value", pa.string()),
-        ("action", pa.string()),
-        ("reason", pa.string()),
-    ]
-)
-
 
 def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
-    """Parse the QASMBench Bronze archive into the three QASMBench Silver tables."""
+    """Parse the QASMBench Bronze archive into the three QASMBench Silver tables.
+
+    One .qasm member is one circuit variant. A member that cannot be decoded or
+    parsed is recorded in data_issues and contributes no rows to any table (a
+    circuit is published whole or not at all). Also records this source's
+    per-table counts in row_counts.json and its run facts in run.json.
+    """
     result = StageResult(stage="prepare_data:qasmbench", run_id=run_id)
 
     archive_bytes = _read_bronze_object(settings, BRONZE_OBJECT)
@@ -536,18 +557,16 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
         members = sorted(name for name in archive.namelist() if name.endswith(".qasm"))
         for member in members:
             result.input_count += 1
-            text = archive.read(member).decode("utf-8")
+            # every member read gets a trace row, so a rejected circuit's issue
+            # row can be traced back to Bronze just like an accepted one
+            trace_rows.append(
+                _trace_row(_circuit_source_record_id(member), member, member, input_sha256)
+            )
             try:
-                _process_member(
-                    member=member,
-                    text=text,
-                    input_sha256=input_sha256,
-                    circuit_rows=circuit_rows,
-                    stabilizer_rows=stabilizer_rows,
-                    correction_rows=correction_rows,
-                    trace_rows=trace_rows,
-                )
+                text = archive.read(member).decode("utf-8")
+                parsed = _process_member(member=member, text=text, input_sha256=input_sha256)
             except (ValueError, KeyError, QASM2ParseError) as error:
+                # UnicodeDecodeError is a ValueError, so undecodable files land here too
                 issues.append(
                     QualityFinding(
                         rule_id="qasmbench.parse_failed",
@@ -555,8 +574,14 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
                         source_system=SOURCE_NAME,
                         source_record_locator=member,
                         message=str(error),
+                        observed_value=member,
                     )
                 )
+                continue
+            circuit_rows.append(parsed.circuit)
+            stabilizer_rows.extend(parsed.stabilizer_checks)
+            correction_rows.extend(parsed.corrections)
+            trace_rows.extend(parsed.trace)
 
     result.output_count = len(circuit_rows) + len(stabilizer_rows) + len(correction_rows)
     result.issue_count = len(issues)
@@ -572,30 +597,76 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
         _CORRECTION_SCHEMA,
     )
 
-    _merge_source_rows_into(
-        RESULTS_PART1 / "source_trace.parquet", _QASM_TRACE_SCHEMA, trace_rows, source_name_column="source_name"
+    RESULTS_PART1.mkdir(parents=True, exist_ok=True)
+    merge_results_parquet(
+        RESULTS_PART1 / "source_trace.parquet",
+        pa.Table.from_pylist(trace_rows, schema=TRACE_SCHEMA),
+        lambda table: pc.equal(table["source_name"], SOURCE_NAME),
     )
-    _merge_source_rows_into(
+    merge_results_parquet(
         RESULTS_PART1 / "data_issues.parquet",
-        _QASM_ISSUE_SCHEMA,
-        [_issue_row(run_id, finding) for finding in issues],
-        source_name_column="source_name",
+        pa.Table.from_pylist(
+            [_issue_row(run_id, finding) for finding in issues], schema=DATA_ISSUES_SCHEMA
+        ),
+        lambda table: pc.starts_with(table["rule_id"], "qasmbench."),
     )
 
     result.finish()
+
+    # stabilizer checks and corrections are derived from accepted circuits
+    # only, so a rejected member removes its rows from all three tables at once
+    rejected_members = len(issues)
+    merge_json_file(
+        RESULTS_PART1 / "row_counts.json",
+        "prepare_data",
+        SOURCE_NAME,
+        payload={
+            "circuit": {
+                "read": result.input_count,
+                "accepted": len(circuit_rows),
+                "rejected": rejected_members,
+            },
+            "stabilizer_check": {"accepted": len(stabilizer_rows)},
+            "conditional_correction": {"accepted": len(correction_rows)},
+            "trace_rows": len(trace_rows),
+        },
+    )
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "prepare_data",
+        SOURCE_NAME,
+        payload={
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": result.started_at.isoformat(),
+            "finished_at": result.finished_at.isoformat(),
+            "input_hashes": {SOURCE_NAME: input_sha256},
+            "output_row_counts": {
+                "silver/qasmbench/circuit.parquet": len(circuit_rows),
+                "silver/qasmbench/stabilizer_check.parquet": len(stabilizer_rows),
+                "silver/qasmbench/conditional_correction.parquet": len(correction_rows),
+                "results/part1/source_trace.parquet (qasmbench rows)": len(trace_rows),
+                "results/part1/data_issues.parquet (qasmbench rows)": len(issues),
+            },
+        },
+    )
     return result
 
 
-def _process_member(
-    *,
-    member: str,
-    text: str,
-    input_sha256: str,
-    circuit_rows: list[dict[str, Any]],
-    stabilizer_rows: list[dict[str, Any]],
-    correction_rows: list[dict[str, Any]],
-    trace_rows: list[dict[str, Any]],
-) -> None:
+@dataclass
+class _ParsedCircuit:
+    # all rows produced by one .qasm member; published together or not at all
+    circuit: dict[str, Any]
+    stabilizer_checks: list[dict[str, Any]]
+    corrections: list[dict[str, Any]]
+    trace: list[dict[str, Any]]
+
+
+def _circuit_source_record_id(member: str) -> str:
+    return f"qasmbench:{member}"
+
+
+def _process_member(*, member: str, text: str, input_sha256: str) -> _ParsedCircuit:
     parts = member.split("/")
     benchmark_name = parts[-2]
     variant = "transpiled" if parts[-1].endswith("_transpiled.qasm") else "source"
@@ -603,12 +674,12 @@ def _process_member(
     circuit = qasm2.loads(text, custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)
     expanded = _expand_custom_gates(circuit)
 
-    circuit_source_record_id = f"qasmbench:{member}"
+    circuit_source_record_id = _circuit_source_record_id(member)
     circuit_id = f"{benchmark_name}:{variant}"
     measurement_count, two_qubit_gate_count = _circuit_counts(expanded)
 
-    circuit_rows.append(
-        {
+    parsed = _ParsedCircuit(
+        circuit={
             "source_record_id": circuit_source_record_id,
             "circuit_id": circuit_id,
             "benchmark_name": benchmark_name,
@@ -617,14 +688,16 @@ def _process_member(
             "qubit_count": sum(register.size for register in circuit.qregs),
             "measurement_count": measurement_count,
             "two_qubit_gate_count": two_qubit_gate_count,
-        }
+        },
+        stabilizer_checks=[],
+        corrections=[],
+        trace=[],
     )
-    trace_rows.append(_trace_row(circuit_source_record_id, member, member, input_sha256))
 
     for ancilla_qubit, data_qubits, syndrome_bit, occurrence in _find_stabilizer_checks(expanded):
         check_id = f"{ancilla_qubit}#{occurrence}"
         source_record_id = f"{circuit_source_record_id}::stabilizer::{check_id}"
-        stabilizer_rows.append(
+        parsed.stabilizer_checks.append(
             {
                 "source_record_id": source_record_id,
                 "circuit_id": circuit_id,
@@ -634,7 +707,7 @@ def _process_member(
                 "syndrome_bit": syndrome_bit,
             }
         )
-        trace_rows.append(
+        parsed.trace.append(
             _trace_row(source_record_id, member, f"{member}#check:{check_id}", input_sha256)
         )
 
@@ -642,7 +715,7 @@ def _process_member(
         _find_conditional_corrections(expanded)
     ):
         source_record_id = f"{circuit_source_record_id}::correction::{index}"
-        correction_rows.append(
+        parsed.corrections.append(
             {
                 "source_record_id": source_record_id,
                 "circuit_id": circuit_id,
@@ -652,7 +725,7 @@ def _process_member(
                 "target_qubit": target_qubit,
             }
         )
-        trace_rows.append(
+        parsed.trace.append(
             _trace_row(
                 source_record_id,
                 member,
@@ -660,6 +733,8 @@ def _process_member(
                 input_sha256,
             )
         )
+
+    return parsed
 
 
 def _expand_custom_gates(circuit: QuantumCircuit) -> QuantumCircuit:
@@ -786,10 +861,12 @@ def _trace_row(source_record_id: str, archive_member: str, record_locator: str, 
 
 def _issue_row(run_id: str, finding: QualityFinding) -> dict[str, Any]:
     return {
-        "issue_id": f"{run_id}:{finding.rule_id}:{finding.source_record_locator}",
+        # content hash, not run_id: a rerun on unchanged input gives the same id
+        "issue_id": stable_record_hash(
+            [finding.rule_id, finding.source_record_locator, finding.message]
+        )[:32],
         "run_id": run_id,
-        "source_name": finding.source_system,
-        "source_record_id": None,
+        "source_record_id": _circuit_source_record_id(finding.source_record_locator),
         "rule_id": finding.rule_id,
         "severity": finding.severity.value,
         "observed_value": finding.observed_value,
@@ -798,92 +875,344 @@ def _issue_row(run_id: str, finding: QualityFinding) -> dict[str, Any]:
     }
 
 
-def _read_bronze_object(settings: Settings, object_name: str) -> bytes:
-    if settings.lake_backend == "local":
-        for root_name in ("bronze", "raw"):
-            candidate = settings.local_lake_root / object_name.replace("bronze/", f"{root_name}/", 1)
-            if candidate.exists():
-                return candidate.read_bytes()
-        raise FileNotFoundError(f"Bronze object not found under {settings.local_lake_root}: {object_name}")
-    client = minio_client(settings)
-    response = client.get_object(settings.s3_bucket, object_name)
+# ---------------------------------------------------------------------------
+# qec_syndromes Silver: syndrome_observation.parquet
+# ---------------------------------------------------------------------------
+
+SYNDROMES_SOURCE_NAME = "qec_syndromes"
+SYNDROMES_BRONZE_OBJECT = "bronze/source=qec_syndromes/syndromes_dataset.zip"
+SYNDROMES_EXPECTED_HEADER = "labels,syndromes,quantity"
+SYNDROMES_FILENAME_RE = re.compile(r"^d-(\d+)_pfr-([\d.]+)_nb-(\w+)\.csv$")
+
+SYNDROMES_SILVER_SCHEMA = pa.schema([
+    ("source_record_id", pa.string()),
+    ("experiment_id", pa.string()),
+    ("physical_fault_rate", pa.float64()),
+    ("syndrome_bits", pa.binary()),  # 4 rounds x 4 checks, one byte per bit (always 16 bytes)
+    ("round_count", pa.int32()),
+    ("check_count", pa.int32()),
+    ("logical_error_label", pa.bool_()),
+    ("quantity", pa.int64()),
+])
+
+SILVER_SYNDROMES_PATH = "silver/qec_syndromes/syndrome_observation.parquet"
+
+
+@dataclass(frozen=True)
+class DataIssue:
+    # why a record was rejected
+    source_record_id: str | None
+    rule_id: str
+    severity: str
+    observed_value: str
+    action: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class TraceRow:
+    # trace the row from the original file to its new Silver position
+    source_record_id: str
+    source_name: str
+    bronze_object: str
+    archive_member: str
+    record_locator: str
+    input_sha256: str
+
+
+def _syndromes_experiment_id(member: str) -> str:
+    # labels rows with which file they came from
+    return f"qec_syndromes:{member}"
+
+
+def _syndromes_record_id(member: str, row_index: int) -> str:
+    # Hash of file+position, not random: reruns produce the same id for the
+    # same row, so a second run doesn't create duplicates
+    return hashlib.sha256(f"{member}:{row_index}".encode()).hexdigest()[:32]
+
+
+def _syndromes_parse_bits(raw: str) -> list[list[int]] | None:
+    # turns the syndromes column text into actual Python numbers and checks
+    # if it's really 4 groups of 4 0's/1's; if anything's off, it returns None
     try:
-        return response.read()
-    finally:
-        response.close()
-        response.release_conn()
+        parsed = ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        return None
+    if not isinstance(parsed, tuple) or len(parsed) != 4:
+        return None
+    rounds: list[list[int]] = []
+    for round_tuple in parsed:
+        if not isinstance(round_tuple, tuple) or len(round_tuple) != 4:
+            return None
+        if not all(bit in (0, 1) for bit in round_tuple):
+            return None
+        rounds.append(list(round_tuple))
+    return rounds
 
 
-def _write_lake_object(settings: Settings, object_name: str, payload: bytes) -> None:
-    if settings.lake_backend == "local":
-        path = settings.local_lake_root / object_name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
-        return
-    client = minio_client(settings)
-    client.put_object(
-        settings.s3_bucket,
-        object_name,
-        data=BytesIO(payload),
-        length=len(payload),
-        content_type="application/octet-stream",
-    )
+def _syndromes_pack_bits(rounds: list[list[int]]) -> bytes:
+    # takes syndromes column numbers and flattens them into 16 single bytes in
+    # order, which is what the output table expects
+    return bytes(bit for round_bits in rounds for bit in round_bits)
 
 
-def _write_lake_parquet(
-    settings: Settings, object_name: str, rows: list[dict[str, Any]], schema: pa.Schema
-) -> None:
-    table = pa.Table.from_pylist(rows, schema=schema)
-    buffer = BytesIO()
-    pq.write_table(table, buffer)
-    _write_lake_object(settings, object_name, buffer.getvalue())
+def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
+    pa.Table, list[DataIssue], list[TraceRow]
+]:
+    # opens the zip and finds every .csv file
+    records: list[dict] = []
+    issues: list[DataIssue] = []
+    trace_rows: list[TraceRow] = []
+
+    with zipfile.ZipFile(io.BytesIO(bronze_bytes)) as archive:
+        csv_members = sorted(n for n in archive.namelist() if n.endswith(".csv"))
+        # checks if the filename and header look right
+        for member in csv_members:
+            match = SYNDROMES_FILENAME_RE.match(member)
+            if not match:
+                issues.append(DataIssue(
+                    source_record_id=None,
+                    rule_id="syndromes.filename_format",
+                    severity="error",
+                    observed_value=member,
+                    action="file_skipped",
+                    reason="filename does not match d-<distance>_pfr-<rate>_nb-<n>.csv",
+                ))
+                continue
+            fault_rate = float(match.group(2))
+            experiment_id = _syndromes_experiment_id(member)
+
+            with archive.open(member) as fh:
+                text = io.TextIOWrapper(fh, encoding="utf-8")
+                try:
+                    header = next(text).strip()
+                except StopIteration:
+                    issues.append(DataIssue(
+                        source_record_id=None,
+                        rule_id="syndromes.empty_file",
+                        severity="error",
+                        observed_value=member,
+                        action="file_skipped",
+                        reason="file is empty (no header row)",
+                    ))
+                    continue
+                if header != SYNDROMES_EXPECTED_HEADER:
+                    issues.append(DataIssue(
+                        source_record_id=None,
+                        rule_id="syndromes.header",
+                        severity="error",
+                        observed_value=header,
+                        action="file_skipped",
+                        reason=f"{member}: expected header '{SYNDROMES_EXPECTED_HEADER}'",
+                    ))
+                    continue
+
+                # reads it and for each line it splits out the 3 fields
+                accepted_quantity_total = 0
+                for row_index, line in enumerate(text, start=1):
+                    line = line.rstrip("\n")
+                    if not line:
+                        continue
+                    # records a trace entry for the row
+                    record_id = _syndromes_record_id(member, row_index)
+                    trace_rows.append(TraceRow(
+                        source_record_id=record_id,
+                        source_name=SYNDROMES_SOURCE_NAME,
+                        bronze_object=SYNDROMES_BRONZE_OBJECT,
+                        archive_member=member,
+                        record_locator=str(row_index),
+                        input_sha256=input_sha256,
+                    ))
+
+                    # quantity is the last comma field; syndromes is quoted and
+                    # may itself contain commas, so split from the right
+                    try:
+                        label_str, rest = line.split(",", 1)
+                        syndromes_str, quantity_str = rest.rsplit(",", 1)
+                    except ValueError:
+                        issues.append(DataIssue(
+                            source_record_id=record_id,
+                            rule_id="syndromes.row_format",
+                            severity="error",
+                            observed_value=line,
+                            action="row_excluded",
+                            reason="row does not have the expected label,syndromes,quantity format",
+                        ))
+                        continue
+                    syndromes_str = syndromes_str.strip('"')
+
+                    # runs the validity checks
+                    rounds = _syndromes_parse_bits(syndromes_str)
+                    try:
+                        quantity = int(quantity_str)
+                    except ValueError:
+                        quantity = None
+                    label = label_str.strip()
+
+                    if rounds is None:
+                        issues.append(DataIssue(
+                            source_record_id=record_id,
+                            rule_id="syndromes.shape",
+                            severity="error",
+                            observed_value=syndromes_str,
+                            action="row_excluded",
+                            reason="syndromes value is not a valid 4x4 binary tuple",
+                        ))
+                        continue
+                    if quantity is None or quantity <= 0:
+                        issues.append(DataIssue(
+                            source_record_id=record_id,
+                            rule_id="syndromes.quantity_positive",
+                            severity="error",
+                            observed_value=quantity_str,
+                            action="row_excluded",
+                            reason="quantity must be a positive integer",
+                        ))
+                        continue
+                    if label not in ("0", "1"):
+                        issues.append(DataIssue(
+                            source_record_id=record_id,
+                            rule_id="syndromes.label_domain",
+                            severity="error",
+                            observed_value=label,
+                            action="row_excluded",
+                            reason="labels must be 0 or 1",
+                        ))
+                        continue
+
+                    accepted_quantity_total += quantity
+                    records.append({
+                        "source_record_id": record_id,
+                        "experiment_id": experiment_id,
+                        "physical_fault_rate": fault_rate,
+                        "syndrome_bits": _syndromes_pack_bits(rounds),
+                        "round_count": 4,
+                        "check_count": 4,
+                        "logical_error_label": bool(int(label)),
+                        "quantity": quantity,
+                    })
+
+                # checks that the total quantity of everything kept
+                # roughly matches what the filename promised, so as to
+                # not silently lose or duplicate anything
+                nb_hint = match.group(3)
+                if nb_hint.endswith("M"):
+                    expected_total = float(nb_hint[:-1]) * 1_000_000
+                    if abs(accepted_quantity_total - expected_total) > 0.02 * expected_total:
+                        issues.append(DataIssue(
+                            source_record_id=None,
+                            rule_id="syndromes.weighted_total_reconciliation",
+                            severity="warning",
+                            observed_value=str(accepted_quantity_total),
+                            action="file_flagged",
+                            reason=(
+                                f"{member}: accepted weighted total "
+                                f"{accepted_quantity_total} vs filename hint "
+                                f"{expected_total}"
+                            ),
+                        ))
+
+    # builds one clean table from everything that passed
+    table = pa.Table.from_pylist(records, schema=SYNDROMES_SILVER_SCHEMA)
+    return table, issues, trace_rows
 
 
-def _merge_source_rows_into(
-    path: Path, schema: pa.Schema, new_rows: list[dict[str, Any]], *, source_name_column: str
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        existing = pq.read_table(path)
-        kept_mask = pc.not_equal(existing.column(source_name_column), SOURCE_NAME)
-        existing = existing.filter(kept_mask)
-    else:
-        existing = pa.Table.from_pylist([], schema=schema)
-    new_table = pa.Table.from_pylist(new_rows, schema=schema)
-    combined = pa.concat_tables([existing, new_table])
-    pq.write_table(combined, path)
+def _issue_id(issue: DataIssue) -> str:
+    # hash of the issue's own content, not its position in the list: a rerun
+    # that finds the same problem (in any order) gets the same issue_id
+    key = f"{issue.rule_id}:{issue.source_record_id or ''}:{issue.observed_value}:{issue.reason}"
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
+def _syndromes_issue_rows(run_id: str, issues: list[DataIssue]) -> list[dict]:
+    return [
+        {
+            "issue_id": _issue_id(issue),
+            "run_id": run_id,
+            "source_record_id": issue.source_record_id,
+            "rule_id": issue.rule_id,
+            "severity": issue.severity,
+            "observed_value": issue.observed_value,
+            "action": issue.action,
+            "reason": issue.reason,
+        }
+        for issue in issues
+    ]
+
 
 def run(run_id: str) -> StageResult:
-    """Build the Silver tables. Only google_qec is implemented so far.
+    """Build the Silver tables for google_qec, qec_syndromes, and qasmbench.
 
-    A failed check raises before anything is written. The syndrome and
-    QASMBench tables are built by adding their own steps below the Google one.
+    A google_qec check that makes an experiment unusable raises before
+    anything is written for that source. A qec_syndromes row or file that
+    fails validation is recorded as a data issue and excluded, never raised;
+    a second run of either source replaces only that source's rows in the
+    shared results files, leaving the other source's rows untouched.
     """
     settings = Settings.from_environment()
     result = StageResult(stage="prepare_data", run_id=run_id)
 
-    archive, bronze_object, input_sha256 = load_google_archive(settings)
-    silver = build_google_table(
-        archive, bronze_object=bronze_object, input_sha256=input_sha256, run_id=run_id
+    # ---- google_qec ----
+    archive, bronze_object, google_input_sha256 = load_google_archive(settings)
+    google_silver = build_google_table(
+        archive, bronze_object=bronze_object, input_sha256=google_input_sha256, run_id=run_id
     )
 
-    write_silver_table(settings, silver.experiment, SILVER_EXPERIMENT_PATH)
-    write_silver_table(settings, silver.shot, SILVER_SHOT_PATH)
+    write_silver_table(settings, google_silver.experiment, SILVER_EXPERIMENT_PATH)
+    write_silver_table(settings, google_silver.shot, SILVER_SHOT_PATH)
     RESULTS_PART1.mkdir(parents=True, exist_ok=True)
     merge_results_parquet(
         RESULTS_PART1 / "source_trace.parquet",
-        silver.trace,
+        google_silver.trace,
         lambda table: pc.equal(table["source_name"], GOOGLE_SOURCE_NAME),
     )
     merge_results_parquet(
         RESULTS_PART1 / "data_issues.parquet",
-        pa.Table.from_pylist(silver.issues, schema=DATA_ISSUES_SCHEMA),
+        pa.Table.from_pylist(google_silver.issues, schema=DATA_ISSUES_SCHEMA),
         lambda table: pc.starts_with(table["rule_id"], "google."),
     )
 
-    result.input_count = silver.experiment.num_rows + silver.shots_read
-    result.output_count = silver.experiment.num_rows + silver.shot.num_rows
-    result.issue_count = len(silver.issues)
+    result.input_count += google_silver.experiment.num_rows + google_silver.shots_read
+    result.output_count += google_silver.experiment.num_rows + google_silver.shot.num_rows
+    result.issue_count += len(google_silver.issues)
+
+    # ---- qec_syndromes ----
+    syndromes_bytes = _read_bronze_object(settings, SYNDROMES_BRONZE_OBJECT)
+    syndromes_input_sha256 = hashlib.sha256(syndromes_bytes).hexdigest()
+    syndromes_table, syndromes_issues, syndromes_trace = build_syndromes(
+        syndromes_bytes, input_sha256=syndromes_input_sha256
+    )
+    # only row-level issues count as rejected rows; file-level issues (skipped
+    # file, weighted-total warning) are not rows, so read == accepted + rejected
+    syndromes_rows_rejected = sum(
+        1 for issue in syndromes_issues if issue.action == "row_excluded"
+    )
+    syndromes_rows_read = syndromes_table.num_rows + syndromes_rows_rejected
+
+    write_silver_table(settings, syndromes_table, SILVER_SYNDROMES_PATH)
+    merge_results_parquet(
+        RESULTS_PART1 / "source_trace.parquet",
+        pa.Table.from_pylist([row.__dict__ for row in syndromes_trace], schema=TRACE_SCHEMA),
+        lambda table: pc.equal(table["source_name"], SYNDROMES_SOURCE_NAME),
+    )
+    merge_results_parquet(
+        RESULTS_PART1 / "data_issues.parquet",
+        pa.Table.from_pylist(
+            _syndromes_issue_rows(run_id, syndromes_issues), schema=DATA_ISSUES_SCHEMA
+        ),
+        lambda table: pc.starts_with(table["rule_id"], "syndromes."),
+    )
+
+    result.input_count += syndromes_rows_read
+    result.output_count += syndromes_table.num_rows
+    result.issue_count += len(syndromes_issues)
+
+    # ---- qasmbench ----
+    qasmbench_result = prepare_qasmbench_silver(settings, run_id)
+    result.input_count += qasmbench_result.input_count
+    result.output_count += qasmbench_result.output_count
+    result.issue_count += qasmbench_result.issue_count
+
     result.finish()
 
     merge_json_file(
@@ -892,16 +1221,16 @@ def run(run_id: str) -> StageResult:
         GOOGLE_SOURCE_NAME,
         payload={
             "experiment": {
-                "read": silver.experiment.num_rows,
-                "accepted": silver.experiment.num_rows,
+                "read": google_silver.experiment.num_rows,
+                "accepted": google_silver.experiment.num_rows,
                 "rejected": 0,
             },
             "shot": {
-                "read": silver.shots_read,
-                "accepted": silver.shot.num_rows,
-                "rejected": len(silver.issues),
+                "read": google_silver.shots_read,
+                "accepted": google_silver.shot.num_rows,
+                "rejected": len(google_silver.issues),
             },
-            "trace_rows": silver.trace.num_rows,
+            "trace_rows": google_silver.trace.num_rows,
         },
     )
     merge_json_file(
@@ -913,13 +1242,45 @@ def run(run_id: str) -> StageResult:
             "code_revision": code_revision(),
             "started_at": result.started_at.isoformat(),
             "finished_at": result.finished_at.isoformat(),
-            "input_hashes": {GOOGLE_SOURCE_NAME: input_sha256},
+            "input_hashes": {GOOGLE_SOURCE_NAME: google_input_sha256},
             "output_row_counts": {
-                SILVER_EXPERIMENT_PATH: silver.experiment.num_rows,
-                SILVER_SHOT_PATH: silver.shot.num_rows,
-                "results/part1/source_trace.parquet (google_qec rows)": silver.trace.num_rows,
-                "results/part1/data_issues.parquet (google_qec rows)": len(silver.issues),
+                SILVER_EXPERIMENT_PATH: google_silver.experiment.num_rows,
+                SILVER_SHOT_PATH: google_silver.shot.num_rows,
+                "results/part1/source_trace.parquet (google_qec rows)": google_silver.trace.num_rows,
+                "results/part1/data_issues.parquet (google_qec rows)": len(google_silver.issues),
             },
         },
     )
+
+    merge_json_file(
+        RESULTS_PART1 / "row_counts.json",
+        "prepare_data",
+        SYNDROMES_SOURCE_NAME,
+        payload={
+            "read": syndromes_rows_read,
+            "accepted": syndromes_table.num_rows,
+            "rejected": syndromes_rows_rejected,
+        },
+    )
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "prepare_data",
+        SYNDROMES_SOURCE_NAME,
+        payload={
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": result.started_at.isoformat(),
+            "finished_at": result.finished_at.isoformat(),
+            "input_hashes": {SYNDROMES_SOURCE_NAME: syndromes_input_sha256},
+            "output_row_counts": {
+                SILVER_SYNDROMES_PATH: syndromes_table.num_rows,
+                "results/part1/source_trace.parquet (qec_syndromes rows)": len(syndromes_trace),
+                "results/part1/data_issues.parquet (qec_syndromes rows)": len(syndromes_issues),
+            },
+        },
+    )
+
+    # qasmbench row_counts.json / run.json entries are written by
+    # prepare_qasmbench_silver itself, which has the per-table counts
+
     return result

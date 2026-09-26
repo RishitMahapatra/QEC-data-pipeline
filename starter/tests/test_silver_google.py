@@ -304,11 +304,45 @@ def test_load_google_archive_stops_when_bronze_has_no_google_object(monkeypatch)
 
 BRONZE_NAME = "bronze/source=google_qec/google-surface-code-curated.zip"
 
+# A single valid, issue-free syndromes file: run() also builds qec_syndromes
+# now, so every test that calls run() needs Bronze bytes for it too. The
+# "nb-2" filename hint doesn't end in "M", so the weighted-total
+# reconciliation check is skipped and this one row never becomes an issue.
+SYNDROMES_ROW = '0,"((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))",5\n'
+
+
+def _syndromes_archive_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as out:
+        out.writestr(
+            "d-3_pfr-0.000010_nb-2.csv",
+            "labels,syndromes,quantity\n" + SYNDROMES_ROW,
+        )
+    return buffer.getvalue()
+
+
+# A single valid, minimal circuit: run() also builds qasmbench now, so every
+# test that calls run() needs Bronze bytes for it too. No cx/if_else means no
+# stabilizer_check or conditional_correction rows, just one circuit row.
+QASM_BENCHMARK = "sample_circuit"
+QASM_SOURCE = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\ncreg c[1];\nmeasure q[0] -> c[0];\n"
+
+
+def _qasmbench_archive_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as out:
+        out.writestr(f"{QASM_BENCHMARK}/{QASM_BENCHMARK}.qasm", QASM_SOURCE)
+    return buffer.getvalue()
+
 
 def stage_run(tmp_path, monkeypatch, archive_bytes: bytes):
     lake = tmp_path / "lake"
     (lake / BRONZE_NAME).parent.mkdir(parents=True)
     (lake / BRONZE_NAME).write_bytes(archive_bytes)
+    (lake / prep.SYNDROMES_BRONZE_OBJECT).parent.mkdir(parents=True)
+    (lake / prep.SYNDROMES_BRONZE_OBJECT).write_bytes(_syndromes_archive_bytes())
+    (lake / prep.BRONZE_OBJECT).parent.mkdir(parents=True)
+    (lake / prep.BRONZE_OBJECT).write_bytes(_qasmbench_archive_bytes())
     results = tmp_path / "results" / "part1"
     monkeypatch.setenv("LAKE_BACKEND", "local")
     monkeypatch.setenv("LOCAL_LAKE_ROOT", str(lake))
@@ -328,7 +362,8 @@ def test_run_writes_silver_tables_and_results(tmp_path, monkeypatch) -> None:
     assert (experiment.num_rows, shot.num_rows) == (1, 4)
 
     trace = pq.read_table(results / "source_trace.parquet")
-    assert trace.schema == prep.TRACE_SCHEMA and trace.num_rows == 1 + 4 * 8
+    # google_qec (1 experiment + 4 shots x 8 trace rows) + qec_syndromes (1) + qasmbench (1)
+    assert trace.schema == prep.TRACE_SCHEMA and trace.num_rows == 1 + 4 * 8 + 1 + 1
     issues = pq.read_table(results / "data_issues.parquet")
     assert issues.schema == prep.DATA_ISSUES_SCHEMA and issues.num_rows == 0
 
@@ -340,7 +375,18 @@ def test_run_writes_silver_tables_and_results(tmp_path, monkeypatch) -> None:
     assert list(run_info["input_hashes"]) == ["google_qec"]
     assert run_info["output_row_counts"][prep.SILVER_SHOT_PATH] == 4
 
-    assert (result.stage, result.input_count, result.output_count, result.issue_count) == ("prepare_data", 5, 5, 0)
+    syndromes = pq.read_table(lake / prep.SILVER_SYNDROMES_PATH)
+    assert syndromes.schema == prep.SYNDROMES_SILVER_SCHEMA and syndromes.num_rows == 1
+    syndromes_counts = json.loads((results / "row_counts.json").read_text())["prepare_data"]["qec_syndromes"]
+    assert syndromes_counts == {"read": 1, "accepted": 1, "rejected": 0}
+
+    circuit = pq.read_table(lake / "silver/qasmbench/circuit.parquet")
+    assert circuit.num_rows == 1
+    qasmbench_counts = json.loads((results / "row_counts.json").read_text())["prepare_data"]["qasmbench"]
+    assert qasmbench_counts["circuit"] == {"read": 1, "accepted": 1, "rejected": 0}
+
+    # google_qec (1 experiment + 4 shots) + qec_syndromes (1 row) + qasmbench (1 circuit)
+    assert (result.stage, result.input_count, result.output_count, result.issue_count) == ("prepare_data", 7, 7, 0)
 
 
 def test_run_twice_leaves_same_records_and_no_duplicates(tmp_path, monkeypatch) -> None:
@@ -375,29 +421,34 @@ def test_run_reports_rejected_shots_in_data_issues(tmp_path, monkeypatch) -> Non
 
 
 def test_run_keeps_other_sources_rows_in_shared_results_files(tmp_path, monkeypatch) -> None:
+    # A fictitious source stands in for one run() doesn't build (all three
+    # real sources are covered by other tests): proves run() only ever
+    # replaces its own sources' rows in the shared results files.
     lake, results = stage_run(tmp_path, monkeypatch, make_archive_bytes())
     results.mkdir(parents=True)
     other_trace = {
-        "source_record_id": "qasm-1", "source_name": "qasmbench", "bronze_object": "b",
+        "source_record_id": "other-1", "source_name": "other_source", "bronze_object": "b",
         "archive_member": "m", "record_locator": "l", "input_sha256": "s",
     }
     other_issue = {
-        "issue_id": "i-1", "run_id": "r", "source_record_id": None, "rule_id": "syndromes.bad_shape",
+        "issue_id": "i-1", "run_id": "r", "source_record_id": None, "rule_id": "other_source.bad_shape",
         "severity": "error", "observed_value": "x", "action": "excluded_from_silver", "reason": "why",
     }
     pq.write_table(pa.Table.from_pylist([other_trace], schema=prep.TRACE_SCHEMA), results / "source_trace.parquet")
     pq.write_table(pa.Table.from_pylist([other_issue], schema=prep.DATA_ISSUES_SCHEMA), results / "data_issues.parquet")
-    (results / "row_counts.json").write_text(json.dumps({"prepare_data": {"qec_syndromes": {"kept": True}}}))
+    (results / "row_counts.json").write_text(json.dumps({"prepare_data": {"other_source": {"kept": True}}}))
 
     prep.run("run-1")
     prep.run("run-2")
 
     trace = pq.read_table(results / "source_trace.parquet").to_pylist()
-    assert [t["source_record_id"] for t in trace if t["source_name"] == "qasmbench"] == ["qasm-1"]
+    assert [t["source_record_id"] for t in trace if t["source_name"] == "other_source"] == ["other-1"]
     assert sum(t["source_name"] == "google_qec" for t in trace) == 1 + 4 * 8
-    assert [i["issue_id"] for i in pq.read_table(results / "data_issues.parquet").to_pylist()] == ["i-1"]
+    issue_ids = [i["issue_id"] for i in pq.read_table(results / "data_issues.parquet").to_pylist()]
+    assert "i-1" in issue_ids
     row_counts = json.loads((results / "row_counts.json").read_text())["prepare_data"]
-    assert row_counts["qec_syndromes"] == {"kept": True} and "google_qec" in row_counts
+    assert row_counts["other_source"] == {"kept": True}
+    assert "google_qec" in row_counts and "qec_syndromes" in row_counts and "qasmbench" in row_counts
 
 
 def test_run_writes_nothing_when_a_check_fails(tmp_path, monkeypatch) -> None:

@@ -99,18 +99,55 @@ not.)*
 No explicit question list in `data-sources.md`; it instead lists what to
 extract at minimum:
 
-- [ ] stable member locator and file hash
-- [ ] benchmark and source/transpiled variant
-- [ ] declared quantum/classical register sizes
-- [ ] operation, measurement, and two-qubit counts (expanded, not just QASM
-      statement lines)
-- [ ] parity-check ancilla, data participants, and syndrome bit where explicit
-- [ ] syndrome-controlled correction value, gate, and target
+- [x] stable member locator and file hash — `source_record_id` is
+      `qasmbench:<member path>`; `source_trace.parquet` records the member and
+      the SHA-256 of the Bronze zip
+- [x] benchmark and source/transpiled variant — from the member's folder name
+      and the `_transpiled.qasm` suffix; `circuit_id` = `<benchmark>:<variant>`
+- [x] declared quantum/classical register sizes — `register_declarations`
+      (JSON of qregs/cregs with sizes, in declaration order)
+- [x] measurement and two-qubit counts, expanded — custom gates are
+      decomposed first (a gate body is a definition, counted only where it is
+      invoked), and register-wide statements count once per qubit
+- [x] parity-check ancilla, data participants, and syndrome bit where explicit
+- [x] syndrome-controlled correction value, gate, and target
 
-Sampled so far: `small/qec_sm_n5/qec_sm_n5.qasm` — 3 data qubits (`q[3]`), 2
-ancillas (`a[2]`), 2-bit syndrome register, conditional X correction on
-syndrome values 1/2/3. Still need `error_correctiond3_n5` and `qec_en_n5`
-(source + transpiled variants of all three = 6 files total).
+All 6 files parsed (3 benchmarks × source/transpiled):
+
+| Benchmark | Registers | 2-qubit gates | Measurements | Checks | Corrections |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `error_correctiond3_n5` | `q[5]`, `c[5]` | 49 | 5 | 0 | 0 |
+| `qec_en_n5` | `q[5]`, `c[5]` | 10 | 5 | 0 | 0 |
+| `qec_sm_n5` | `q[3]`, `a[2]`, `c[3]`, `syn[2]` | 4 | 5 | 2 | 3 |
+
+Source and transpiled variants give the same numbers.
+
+**Decision — what counts as an explicit parity check.** A check is recorded
+when data qubits act as CNOT controls onto one ancilla qubit that is only ever
+a CNOT target (no single-qubit gates on it), and that ancilla is then measured
+into a classical bit. That is the syndrome bit. In `qec_sm_n5`, `a[0]` checks
+`q[0],q[1]` into `syn[0]` and `a[1]` checks `q[1],q[2]` into `syn[1]`.
+`error_correctiond3_n5` and `qec_en_n5` produce no check rows on purpose: they
+have no separate ancilla register, and the qubit collecting the parity
+(`q[2]`) also gets single-qubit gates (H, and T in `qec_en_n5`) between the
+CNOTs, and is measured together with the data qubits into one register
+`c[5]`. Nothing in the file
+says which classical bit is a syndrome bit. `data-sources.md` asks for checks
+"where explicit", so we do not guess a role for these qubits.
+
+**Decision — conditional operations.** Each single-qubit gate inside an
+`if(reg==value)` is one `conditional_correction` row; `if(...) x q;` on a whole
+register gives one row per qubit. Gates inside an `if` block are not added to
+`measurement_count` / `two_qubit_gate_count`, because they only run when the
+condition holds. None of the 6 files has a conditional two-qubit gate or
+measurement, so this choice does not change any current count.
+
+**Rejected files.** A member that cannot be decoded as UTF-8 or parsed as
+OpenQASM 2 is written to `data_issues.parquet` (`qasmbench.parse_failed`, the
+member path as value, the parser message as reason) and adds no rows to any
+of the three tables. Its trace row is kept so the issue still traces to
+Bronze. `row_counts.json` reconciles at circuit level (read = accepted +
+rejected); checks and corrections come only from accepted circuits.
 
 ---
 
@@ -142,5 +179,7 @@ parity-check/correction structure — consistent with `brief.md`: "QASMBench
 cannot be joined row by row to the Google or simulated experiments... do not
 invent a match."
 
-TODO: confirm by actually opening `error_correctiond3_n5.qasm` (not just
-`qec_sm_n5.qasm`) and recording its real register sizes here.
+Confirmed from the file itself: `error_correctiond3_n5.qasm` declares only
+`qreg q[5]; creg c[5];`, so it has 5 qubits and no separate ancilla or
+syndrome register. That is far from the 17-qubit distance-3 Google layout, so
+the rejection stands.
