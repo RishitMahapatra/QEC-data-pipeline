@@ -11,6 +11,8 @@ import io
 import zipfile
 from hashlib import sha256
 
+import pyarrow as pa
+
 from quantum_lake_student.config import Settings
 from quantum_lake_student.connections import minio_client
 from quantum_lake_student.stages import prepare_data as pd
@@ -52,6 +54,60 @@ def test_known_good_row_parses_correctly():
     ])
     assert len(trace_rows) == 1
     assert trace_rows[0].source_record_id == row["source_record_id"]
+
+
+def test_schema_matches_silver_contract():
+    data = _zip_bytes({"d-3_pfr-0.000010_nb-10M.csv": _syndrome_csv(GOOD_ROW)})
+
+    table, _, _ = pd.build_syndromes(data, input_sha256=sha256(data).hexdigest())
+
+    assert table.schema.names == [
+        "source_record_id", "experiment_id", "physical_fault_rate", "syndrome_bits",
+        "round_count", "check_count", "logical_error_label", "quantity",
+    ]
+    assert table.schema.field("syndrome_bits").type == pa.binary()
+    assert table.schema.field("physical_fault_rate").type == pa.float64()
+    assert table.schema.field("round_count").type == pa.int32()
+    assert table.schema.field("check_count").type == pa.int32()
+    assert table.schema.field("logical_error_label").type == pa.bool_()
+    assert table.schema.field("quantity").type == pa.int64()
+
+
+def test_wrong_header_skips_file():
+    data = _zip_bytes({"d-3_pfr-0.000010_nb-10M.csv": "label,syndrome,qty\n" + GOOD_ROW})
+
+    table, issues, trace_rows = pd.build_syndromes(data, input_sha256=sha256(data).hexdigest())
+
+    assert table.num_rows == 0
+    assert trace_rows == []
+    header_issues = [i for i in issues if i.rule_id == "syndromes.header"]
+    assert len(header_issues) == 1
+    assert header_issues[0].action == "file_skipped"
+    assert header_issues[0].observed_value == "label,syndrome,qty"
+
+
+def test_unexpected_filename_skips_file():
+    data = _zip_bytes({"syndromes_extra.csv": _syndrome_csv(GOOD_ROW)})
+
+    table, issues, _ = pd.build_syndromes(data, input_sha256=sha256(data).hexdigest())
+
+    assert table.num_rows == 0
+    filename_issues = [i for i in issues if i.rule_id == "syndromes.filename_format"]
+    assert len(filename_issues) == 1
+    assert filename_issues[0].observed_value == "syndromes_extra.csv"
+
+
+def test_label_outside_0_1_is_rejected():
+    bad_label_row = '2,"((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))",5\n'
+    data = _zip_bytes({"d-3_pfr-0.000010_nb-10M.csv": _syndrome_csv(GOOD_ROW, bad_label_row)})
+
+    table, issues, _ = pd.build_syndromes(data, input_sha256=sha256(data).hexdigest())
+
+    assert table.num_rows == 1
+    label_issues = [i for i in issues if i.rule_id == "syndromes.label_domain"]
+    assert len(label_issues) == 1
+    assert label_issues[0].observed_value == "2"
+    assert label_issues[0].action == "row_excluded"
 
 
 def test_malformed_tuple_is_rejected_into_issues():

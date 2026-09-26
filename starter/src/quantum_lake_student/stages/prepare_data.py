@@ -829,7 +829,7 @@ SYNDROMES_SILVER_SCHEMA = pa.schema([
     ("source_record_id", pa.string()),
     ("experiment_id", pa.string()),
     ("physical_fault_rate", pa.float64()),
-    ("syndrome_bits", pa.binary(16)),  # 4 rounds x 4 checks, one byte per bit
+    ("syndrome_bits", pa.binary()),  # 4 rounds x 4 checks, one byte per bit (always 16 bytes)
     ("round_count", pa.int32()),
     ("check_count", pa.int32()),
     ("logical_error_label", pa.bool_()),
@@ -1123,9 +1123,12 @@ def run(run_id: str) -> StageResult:
     syndromes_table, syndromes_issues, syndromes_trace = build_syndromes(
         syndromes_bytes, input_sha256=syndromes_input_sha256
     )
-    syndromes_rows_read = syndromes_table.num_rows + sum(
+    # only row-level issues count as rejected rows; file-level issues (skipped
+    # file, weighted-total warning) are not rows, so read == accepted + rejected
+    syndromes_rows_rejected = sum(
         1 for issue in syndromes_issues if issue.action == "row_excluded"
     )
+    syndromes_rows_read = syndromes_table.num_rows + syndromes_rows_rejected
 
     write_silver_table(settings, syndromes_table, SILVER_SYNDROMES_PATH)
     merge_results_parquet(
@@ -1197,7 +1200,7 @@ def run(run_id: str) -> StageResult:
         payload={
             "read": syndromes_rows_read,
             "accepted": syndromes_table.num_rows,
-            "rejected": len(syndromes_issues),
+            "rejected": syndromes_rows_rejected,
         },
     )
     merge_json_file(
