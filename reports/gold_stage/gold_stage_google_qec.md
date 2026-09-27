@@ -4,6 +4,8 @@ This document describes the Gold-stage PostgreSQL design for the `google_qec`
 source: what each table represents, why the schema is shaped the way it is,
 how loading is made safe to rerun, and what is explicitly out of scope.
 
+
+
 ---
 
 ## 1. Purpose
@@ -227,6 +229,20 @@ throwaway Postgres schema (created and dropped per test — the real
   intact
 
 ---
+## Requirements coverage
+
+| Requirement | How it is met |
+| --- | --- |
+| Student-designed tables, not a copy of Silver | Decoder table split (Section 5) |
+| Primary keys, foreign keys, value checks, indexes | Section 3 |
+| Rules driven by the data, not generic checks | Section 3, "Data-driven checks" |
+| All-or-nothing load | Section 6 |
+| Repeated loads create no duplicates | Section 6 (truncate-then-insert) |
+| Every row traceable to its Silver source | `source_record_id` on experiment and shot (Section 2) |
+| Reconciled row counts, not just a single number | Section 7 |
+| No invented cross-source relationship | Section 9 |
+
+All 14 tests pass: `cd starter && uv run pytest tests/test_load_postgres.py`
 
 ## 9. Explicitly rejected relationship
 
