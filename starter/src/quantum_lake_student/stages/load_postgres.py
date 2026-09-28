@@ -18,22 +18,23 @@ from quantum_lake_student.stages.prepare_data import SILVER_SYNDROMES_PATH
 SYNDROMES_SOURCE_NAME = "qec_syndromes"
 
 # syndrome_experiment table with one row per fault-rate file,
-# with checks that the rate is positive and rounds and checks both equal 4
+# with checks that the rate is a probability (between 0 and 1) and rounds and checks both equal 4
 SYNDROME_EXPERIMENT_DDL = """
 CREATE TABLE IF NOT EXISTS syndrome_experiment (
     experiment_id       TEXT PRIMARY KEY,
-    physical_fault_rate NUMERIC NOT NULL CHECK (physical_fault_rate > 0),
+    physical_fault_rate NUMERIC NOT NULL CHECK (physical_fault_rate > 0 AND physical_fault_rate < 1),
     round_count         INT NOT NULL CHECK (round_count = 4),
     check_count         INT NOT NULL CHECK (check_count = 4)
 );
 """
 
 # syndrome_pattern: one row per distinct 16-bit pattern, plus how many of its
-# 16 checks actually fired. octet_length CHECK is a DB-level guarantee that a
-# pattern is really 16 bytes, on top of what Silver already validated.
+# 16 checks actually fired. The CHECK is a DB-level guarantee that a pattern is
+# really 16 bytes and each byte is 0 or 1 (hex "00" or "01"), on top of what
+# Silver already validated.
 SYNDROME_PATTERN_DDL = """
 CREATE TABLE IF NOT EXISTS syndrome_pattern (
-    syndrome_bits          BYTEA PRIMARY KEY CHECK (octet_length(syndrome_bits) = 16),
+    syndrome_bits          BYTEA PRIMARY KEY CHECK (encode(syndrome_bits, 'hex') ~ '^(0[01]){16}$'),
     triggered_check_count  INT NOT NULL CHECK (triggered_check_count BETWEEN 0 AND 16)
 );
 """
@@ -207,6 +208,18 @@ def run(run_id: str) -> StageResult:
                 experiment_id: int(total) for experiment_id, total in cursor.fetchall()
             }
 
+            # every Silver row (and its quantity weight) must arrive in Gold exactly
+            # once. Raising here, before the commit, rolls the whole load back, so
+            # a load that lost or duplicated rows never replaces the previous Gold data
+            rows_match = observation_count == syndromes_table.num_rows
+            quantity_match = gold_quantity_by_experiment == silver_quantity_by_experiment
+            if not (rows_match and quantity_match):
+                raise ValueError(
+                    f"Silver-to-Gold mismatch: {syndromes_table.num_rows} Silver rows vs "
+                    f"{observation_count} Gold rows; quantity per experiment "
+                    f"Silver={silver_quantity_by_experiment} Gold={gold_quantity_by_experiment}"
+                )
+
     result.output_count = observation_count
     result.finish()
 
@@ -235,12 +248,16 @@ def run(run_id: str) -> StageResult:
         payload={
             "silver_rows": syndromes_table.num_rows,
             "gold_observation_rows": observation_count,
+            "rows_match": rows_match,
             "silver_quantity_total": sum(silver_quantity_by_experiment.values()),
             "gold_quantity_total": gold_quantity_total,
+            "quantity_match": quantity_match,
             "quantity_by_experiment": {
                 experiment_id: {
                     "silver": silver_quantity_by_experiment.get(experiment_id, 0),
                     "gold": gold_quantity_by_experiment.get(experiment_id, 0),
+                    "match": silver_quantity_by_experiment.get(experiment_id, 0)
+                    == gold_quantity_by_experiment.get(experiment_id, 0),
                 }
                 for experiment_id in silver_quantity_by_experiment
             },
