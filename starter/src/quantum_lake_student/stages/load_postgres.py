@@ -9,11 +9,12 @@ According to the rubrics, it includes:
 Note: Repeated loads must not create duplicate records
 '''
 
-#ANSWER TO QUESTION.....(Please check the logic too)
-'''
-JUSTIFICATION TO THE DETECTOR BITS STORAGE DECISION:
-Detector storage decision: detector_bits is stored as one packed BYTEA value per shot row, not one row per individual detector. Distance-3 experiments have 200 detectors/shot (25 bytes packed: ceil(200/8)), distance-5 has 600 detectors/shot (75 bytes packed: ceil(600/8)). Across all 250,000 shots (4 distance-3 experiments × 50,000 + 1 distance-5 × 50,000), total packed storage is (200,000 × 25) + (50,000 × 75) = 5,000,000 + 3,750,000 = 8,750,000 bytes ≈ 8.75 MB. The alternative — one row per detector reading — would produce (200 × 200,000) + (600 × 50,000) = 40,000,000 + 30,000,000 = 70,000,000 rows, a ~280x increase in row count for data that no required query or ML table needs at single-detector granularity.
-'''
+# Detector storage decision: detector_bits is stored as one packed BYTEA value per shot row,
+# not one row per individual detector. Distance-3 has 200 detectors/shot (25 bytes packed),
+# distance-5 has 600 (75 bytes). Across all 250,000 shots that is
+# (200,000 x 25) + (50,000 x 75) = 8,750,000 bytes. One row per detector would instead need
+# (200 x 200,000) + (600 x 50,000) = 70,000,000 rows (~280x more), for data that no required
+# query or ML table needs at single-detector granularity.
 
 import io #used to read the raw MinIO bytes so pyarrow can read them as a file
 
@@ -32,7 +33,7 @@ For the google_qec gold stage -> takes the two validated silver parquet tables. 
 Load is all-or-nothing (rollback on any failure), and idempotent (rerun replaces the rows, doesn't duplicate).
 '''
 
-# DECODER_NAMES: the four decoders supplied for google_qec. Pulled out as a module-level constant so both the schema design and the load logic agree on the same four names (IN RESPONSE TO DECODER-TABLE COMMENT)
+# DECODER_NAMES: the four decoders supplied for google_qec. Pulled out as a module-level constant so both the schema design and the load logic agree on the same four names
 DECODER_NAMES = (
     "belief_matching",
     "correlated_matching",
@@ -45,8 +46,8 @@ DECODER_NAMES = (
 GOOGLE_GOLD_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS gold_google_experiment ( --for each experiment directory
     experiment_id       TEXT PRIMARY KEY, -- one row per experiment
-    source_record_id TEXT NOT NULL, -- this is to trace form which silver row this particular gold row came from (IN RESPONSE TO HIGH PRIORITY COMMENT)
-    basis                TEXT NOT NULL CHECK (basis in('X','Z')), --measurement basis and added the checks to includes only X and Z (IN RESPONSE TO COMMENT ABOUT CHECKING IF THE BASIS ONLY INCLUDES X and Z and not just NOT NULL...
+    source_record_id TEXT NOT NULL, -- traces which Silver row this Gold row came from
+    basis                TEXT NOT NULL CHECK (basis in('X','Z')), -- logical measurement basis, only X or Z
     distance             INTEGER NOT NULL CHECK (distance > 0), --the distance must be positive 
     rounds                INTEGER NOT NULL CHECK (rounds > 0), -- QEC rounds must be positive
     shots                 INTEGER NOT NULL CHECK (shots > 0), --shot count must be positive
@@ -66,7 +67,7 @@ COMMENT ON TABLE gold_google_experiment IS
 
 CREATE TABLE IF NOT EXISTS gold_google_shot ( -- for the single shots
     experiment_id                          TEXT NOT NULL REFERENCES gold_google_experiment(experiment_id), 
-    source_record_id TEXT NOT NULL, -- this is to trace form which silver row this particular gold row came from (IN RESPONSE TO HIGH PRIORITY COMMENT)
+    source_record_id TEXT NOT NULL, -- traces which Silver row this Gold row came from
     shot_index                             INTEGER NOT NULL CHECK (shot_index >= 0), -- can be zero based and non negative
     measurement_bits                       BYTEA NOT NULL, --raw packed bits for this shot
     sweep_bits                             BYTEA NOT NULL, -- configuration bits for this shot
@@ -76,14 +77,14 @@ CREATE TABLE IF NOT EXISTS gold_google_shot ( -- for the single shots
     actual_observable_flip                 BOOLEAN NOT NULL, --ground truth outcome 
     PRIMARY KEY (experiment_id, shot_index)  -- composite: a shot is only unique WITHIN its experiment
 );
--- NOTE: the four decoder_prediction boolean columns that used to live here  have been moved out into gold_google_decoder_prediction below, so that "what a decoder guessed" and "whether it was wrong" are their own table instead of four repeated yes/no columns bolted onto shot(IN RESPONSE TO "DON'T JUST COPY SILVER" / DECODER-TABLE COMMENT)
+-- NOTE: the four decoder prediction columns from Silver live in gold_google_decoder_prediction below, so that "what a decoder guessed" and "whether it was wrong" are their own table instead of four repeated yes/no columns on shot
 
 COMMENT ON TABLE gold_google_shot IS
     'One row represents one hardware shot (one circuit execution) within one Google experiment, with its raw bits and actual outcome. Decoder predictions live in gold_google_decoder_prediction.';
 
 CREATE INDEX IF NOT EXISTS idx_google_shot_experiment_id ON gold_google_shot(experiment_id);
 
--- New table: one row per decoder algorithm (4 rows total for google_qec)(IN RESPONSE TO DECODER-TABLE COMMENT)
+-- One row per decoder algorithm (4 rows total for google_qec)
 
 CREATE TABLE IF NOT EXISTS gold_google_decoder (
     decoder_name TEXT PRIMARY KEY
@@ -92,7 +93,7 @@ CREATE TABLE IF NOT EXISTS gold_google_decoder (
 COMMENT ON TABLE gold_google_decoder IS
     'One row per decoder algorithm available for google_qec (belief_matching, correlated_matching, pymatching, tensor_network_contraction).';
 
--- New table: one row per shot per decoder, separating "what it guessed" from "whether it was wrong" - the rubric cares about not mixing these up (IN RESPONSE TO DECODER-TABLE COMMENT)
+-- One row per shot per decoder, separating "what it guessed" from "whether it was wrong"
 
 CREATE TABLE IF NOT EXISTS gold_google_decoder_prediction (
     experiment_id     TEXT NOT NULL,
@@ -131,7 +132,7 @@ def _read_silver_parquet(settings, object_name: str) -> pa.Table: #this is a hel
     
 def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loads the silver data to gold
     # Args:
-    # conn: takes the PostgreSQL connection, settings = env config  returns a tuple of 3 integers (experiment count, shot count, decoder prediction count)(return signature widened to 3 - IN RESPONSE TO DECODER-TABLE COMMENT)
+    # conn: takes the PostgreSQL connection, settings = env config  returns a tuple of 3 integers (experiment count, shot count, decoder prediction count)
     
     """Load Silver's google_qec Parquet tables into Postgres, all-or-nothing.
 
@@ -142,7 +143,7 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loa
     experiment_table = _read_silver_parquet(settings, "silver/google_qec/experiment.parquet") #calling the parquet tables for experiments
     shot_table = _read_silver_parquet(settings, "silver/google_qec/shot.parquet") #calling the parquet tables for the shots
 
-    with conn.cursor() as cur: # Open a database cursor to run SQL commands.TRUNCATE order updated to also wipe the two new decoder tables - CASCADE handles the dependency order automatically (IN RESPONSE TO DECODER-TABLE COMMENT)
+    with conn.cursor() as cur: # Open a database cursor to run SQL commands. TRUNCATE wipes all four Gold tables - CASCADE handles the dependency order automatically
         cur.execute(
             "TRUNCATE TABLE gold_google_decoder_prediction, gold_google_shot, "
             "gold_google_experiment, gold_google_decoder RESTART IDENTITY CASCADE;"
@@ -158,7 +159,6 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loa
             """,
             # contains the template for insertion of values 
             [
-                # added r["source_record_id"] here - it was declared in the column list above but missing from the value tuple (IN RESPONSE TO HIGH PRIORITY COMMENT)
                 (r["experiment_id"], r["source_record_id"], r["basis"], r["distance"], r["rounds"], r["shots"],
                  r["center_row"], r["center_col"], r["measurement_count"], r["detector_count"])
                 for r in experiment_table.to_pylist()
@@ -174,7 +174,6 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loa
                  detector_event_count, actual_observable_flip)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            # column list and placeholders trimmed to 8 - the 4 decoder prediction columns no longer live on this table (IN RESPONSE TO DECODER-TABLE COMMENT)
             [
                 
                 (r["experiment_id"], r["source_record_id"], r["shot_index"], r["measurement_bits"], r["sweep_bits"], r["detector_bits"],
@@ -183,7 +182,7 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loa
             ],
         )
 
-        # --- New: load the decoder table and the decoder_prediction table --- (IN RESPONSE TO DECODER-TABLE COMMENT)
+        # Load the decoder table and the decoder_prediction table
 
         # 4 rows, one per decoder name
         cur.executemany(
@@ -208,10 +207,7 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loa
             decoder_prediction_rows,
         )
 
-    # return count widened to include decoder_prediction rows (IN RESPONSE TO DECODER-TABLE COMMENT)
     return experiment_table.num_rows, shot_table.num_rows, len(decoder_prediction_rows)
-
-from quantum_lake_student.models import RESULTS_PART1, StageResult, merge_json_file, code_revision
 
 
 def run(run_id: str) -> StageResult:
@@ -224,7 +220,6 @@ def run(run_id: str) -> StageResult:
         with conn.cursor() as cur:
             cur.execute(GOOGLE_GOLD_SCHEMA_SQL)
 
-        # unpacking widened to 3 values to match load_google_gold's new return signature (IN RESPONSE TO DECODER-TABLE COMMENT)
         exp_count, shot_count, decoder_prediction_count = load_google_gold(conn, settings)
         conn.commit()
     except Exception:
@@ -240,7 +235,7 @@ def run(run_id: str) -> StageResult:
 
     RESULTS_PART1.mkdir(parents=True, exist_ok=True)
 
-    # expected decoder_prediction count is shot_count x number of decoders - used below to confirm nothing silently dropped (IN RESPONSE TO ROW-COUNT COMPARISON COMMENT)
+    # expected decoder_prediction count is shot_count x number of decoders - used below to confirm nothing silently dropped
     expected_decoder_prediction_count = shot_count * len(DECODER_NAMES)
 
     merge_json_file(
@@ -254,7 +249,7 @@ def run(run_id: str) -> StageResult:
             "output_row_counts": {
                 "gold_google_experiment": exp_count,
                 "gold_google_shot": shot_count,
-                "gold_google_decoder_prediction": decoder_prediction_count,  # new (DECODER-TABLE COMMENT)
+                "gold_google_decoder_prediction": decoder_prediction_count,
             },
         },
     )
@@ -263,7 +258,7 @@ def run(run_id: str) -> StageResult:
         "load_postgres", "google_qec",
         payload={
             # silver_rows and gold_loaded are the same read here since Gold never filters/rejects rows -
-            # both are reported explicitly (rather than one number) so a future mismatch would be visible, not silent (IN RESPONSE TO ROW-COUNT COMPARISON COMMENT)
+            # both are reported explicitly (rather than one number) so a future mismatch would be visible, not silent
             "experiment": {"silver_rows": exp_count, "gold_loaded": exp_count, "match": exp_count == exp_count},
             "shot": {"silver_rows": shot_count, "gold_loaded": shot_count, "match": shot_count == shot_count},
             "decoder_prediction": {"expected": expected_decoder_prediction_count, "gold_loaded": decoder_prediction_count, "match": decoder_prediction_count == expected_decoder_prediction_count},
