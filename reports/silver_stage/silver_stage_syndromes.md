@@ -30,8 +30,8 @@ physical fault rate and is stable and unique per file, so no extra key is
 needed. `physical_fault_rate` itself is parsed out of the same filename.
 
 **3. `syndrome_bits` is stored as 16 one-byte values, round-major then
-check-second** (4 rounds × 4 checks), exactly as `silver-tables.md` requires.
-The `syndromes` column arrives as Python-literal nested-tuple text, e.g.
+check-second** (4 rounds × 4 checks). The `syndromes` column arrives as
+Python-literal nested-tuple text, e.g.
 `"((0, 0, 0, 0), (0, 0, 1, 0), ...)"`. It is parsed with `ast.literal_eval`
 (safe against arbitrary code, unlike `eval`), never with plain string
 splitting, and rejected as invalid if it is not exactly 4 tuples of 4 binary
@@ -40,7 +40,8 @@ values.
 **4. `quantity` is kept as a weight, never expanded into repeated rows.** A
 single row can represent millions of physical observations; multiplying it
 out into one row per observation would make Silver ~70M rows instead of
-~76k, and the assignment caps the grade at 70 if this weight is ignored.
+~76k, and would throw away the fact that some observations are far more
+common than others.
 
 **5. The same syndrome pattern is never deduplicated across labels.** A
 pattern that legitimately occurs with both `logical_error_label = 0` and
@@ -91,8 +92,7 @@ duplicates.
 
 **10. No joins with other sources.** qec_syndromes rows are parsed and
 validated entirely on their own; nothing here depends on google_qec or
-qasmbench, matching the assignment's rule against inventing cross-source
-identifiers.
+qasmbench, and no cross-source identifier is invented to connect them.
 
 ## Requirements coverage
 

@@ -36,6 +36,7 @@ ROW_B_SAME_PATTERN_OTHER_LABEL = {
     "logical_error_label": True,
     "quantity": 30,
 }
+DISTINCT_PATTERN_BITS = bytes([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 
 
 def _table(*rows: dict) -> pa.Table:
@@ -135,3 +136,97 @@ def test_observation_rejects_a_pattern_that_was_never_inserted(cursor):
             (bytes(16),),
         )
     cursor.connection.rollback()
+
+
+def test_observation_rejects_an_experiment_that_was_never_inserted(cursor):
+    lp.create_syndrome_tables(cursor)
+    cursor.execute(
+        "INSERT INTO syndrome_pattern (syndrome_bits, triggered_check_count) VALUES (%s, %s)",
+        (ROW_A["syndrome_bits"], 1),
+    )
+    with pytest.raises(Exception, match="foreign key|violates"):
+        cursor.execute(
+            """
+            INSERT INTO syndrome_observation
+                (observation_id, experiment_id, syndrome_bits, logical_error_label, quantity, source_record_id)
+            VALUES ('obs-1', 'unknown-exp', %s, false, 1, 'rec-x')
+            """,
+            (ROW_A["syndrome_bits"],),
+        )
+    cursor.connection.rollback()
+
+
+def test_pattern_rejects_syndrome_bits_of_the_wrong_length(cursor):
+    lp.create_syndrome_tables(cursor)
+    with pytest.raises(Exception, match="check|violates"):
+        cursor.execute(
+            "INSERT INTO syndrome_pattern (syndrome_bits, triggered_check_count) VALUES (%s, %s)",
+            (bytes(15), 0),
+        )
+    cursor.connection.rollback()
+
+
+def test_observation_rejects_non_positive_quantity(cursor):
+    lp.create_syndrome_tables(cursor)
+    bad_row = {**ROW_A, "quantity": 0}
+    with pytest.raises(Exception, match="check|violates"):
+        lp.load_syndrome_tables(cursor, _table(bad_row))
+    cursor.connection.rollback()
+
+
+def test_source_record_id_is_kept_after_loading(cursor):
+    lp.create_syndrome_tables(cursor)
+    lp.load_syndrome_tables(cursor, _table(ROW_A))
+
+    cursor.execute("SELECT source_record_id FROM syndrome_observation")
+    assert cursor.fetchone()[0] == "rec-a"
+
+
+def test_two_silver_rows_mapping_to_the_same_observation_are_rejected_loudly(cursor):
+    # Two rows with the same (experiment, pattern, label) but different
+    # source_record_id would otherwise silently overwrite one another's
+    # quantity via ON CONFLICT. This must raise instead of doing that.
+    lp.create_syndrome_tables(cursor)
+    colliding_row = {**ROW_A, "source_record_id": "rec-different", "quantity": 5}
+
+    with pytest.raises(ValueError, match="observation_id"):
+        lp.load_syndrome_tables(cursor, _table(ROW_A, colliding_row))
+
+
+def test_failed_load_leaves_previous_data_in_place(cursor):
+    connection = cursor.connection
+    lp.create_syndrome_tables(cursor)
+    lp.load_syndrome_tables(cursor, _table(ROW_A))
+    connection.commit()
+
+    bad_row = {**ROW_A, "source_record_id": "rec-bad", "quantity": 0}
+    with pytest.raises(Exception):
+        lp.load_syndrome_tables(cursor, _table(ROW_A, bad_row))
+    connection.rollback()
+
+    assert _count(cursor, "syndrome_observation") == 1
+    cursor.execute("SELECT quantity FROM syndrome_observation")
+    assert cursor.fetchone()[0] == 100  # ROW_A's committed value, untouched by the failed rerun
+
+
+def test_row_removed_from_silver_is_removed_from_gold_on_rerun(cursor):
+    lp.create_syndrome_tables(cursor)
+    other_row = {
+        **ROW_A,
+        "source_record_id": "rec-c",
+        "experiment_id": "exp-2",
+        "physical_fault_rate": 0.0005,
+        "syndrome_bits": DISTINCT_PATTERN_BITS,
+    }
+    lp.load_syndrome_tables(cursor, _table(ROW_A, other_row))
+    assert _count(cursor, "syndrome_experiment") == 2
+    assert _count(cursor, "syndrome_pattern") == 2
+    assert _count(cursor, "syndrome_observation") == 2
+
+    lp.load_syndrome_tables(cursor, _table(ROW_A))  # exp-2's row no longer present in Silver
+
+    assert _count(cursor, "syndrome_experiment") == 1
+    assert _count(cursor, "syndrome_pattern") == 1
+    assert _count(cursor, "syndrome_observation") == 1
+    cursor.execute("SELECT experiment_id FROM syndrome_experiment")
+    assert cursor.fetchone()[0] == "exp-1"
