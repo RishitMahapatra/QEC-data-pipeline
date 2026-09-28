@@ -151,6 +151,84 @@ rejected); checks and corrections come only from accepted circuits.
 
 ---
 
+## qasmbench Gold design
+
+*Stage: Gold (`load_postgres.py`, `load_qasmbench_gold` / `run_qasmbench_gold`).
+Loads the three QASMBench Silver tables into four Postgres tables, scoped to
+QASMBench only — Google and syndromes Gold tables are separate. As of this
+merge, qasmbench's Gold code lives in the same `load_postgres.py` as
+google_qec's (brought over from the team's `rishit_mahapatra` branch), in the
+same file/table-naming/function shape, so the two sources read the same to
+anyone reviewing the module: `gold_<source>_<entity>` tables, a
+`load_<source>_gold(conn, settings)` connection-scoped loader, and a
+`run_<source>_gold(settings, run_id)` wrapper that owns the transaction and
+the evidence files.*
+
+**Decision — table names and location match google_qec's convention.**
+Tables are `gold_qasmbench_circuit`, `gold_qasmbench_register`,
+`gold_qasmbench_stabilizer_check`, `gold_qasmbench_conditional_correction` —
+unprefixed, relying on the connection's default schema (`public`), the same
+as `gold_google_*`. An earlier draft of this design put qasmbench's tables in
+a dedicated `qec` schema; that was dropped in favor of matching google_qec's
+already-established convention once the two sources' code was merged into
+one file, rather than leaving the two sources visibly inconsistent. Which
+schema the whole Gold model should eventually live in is still open (see
+`reports/gold_stage/gold_stage_google_qec.md`'s "Open items").
+
+**Decision — normalize `register_declarations` instead of copying it.**
+Silver's `circuit.parquet` keeps `register_declarations` as one JSON-text
+column (a nested list of qreg/creg name+size pairs). Gold decomposes it into
+its own table, `gold_qasmbench_register` (one row per declared register, FK
+to `gold_qasmbench_circuit`), instead of also carrying a JSONB copy of the
+same column. Two representations of the same fact with nothing to keep them
+in sync is worse than one; the brief says Gold must not "merely copy each
+Silver table into PostgreSQL", and turning an opaque JSON blob into typed,
+constrained (`register_size > 0`, `register_kind IN ('qreg','creg')`) rows is
+exactly that kind of value-add. Only 4 registers per circuit variant (q, a,
+c, syn for the parity-check benchmark) — decomposing costs one small table,
+not real complexity.
+
+**Decision — keep `data_qubits` as a native `text[]` column, not a junction
+table.** `stabilizer_check.parquet`'s `data_qubits` is a small (2 elements),
+fixed-shape, ordered attribute of one check row, not an independent
+many-to-many relationship worth its own table — across the whole QASMBench
+archive it's ~8 total (qubit, check) pairs.
+`gold_qasmbench_stabilizer_check.data_qubits` is `text[]` with
+`CHECK (cardinality(data_qubits) >= 1)`. Postgres arrays are queryable
+(`= ANY(data_qubits)`, `&&`) without the overhead of a fifth table for this
+data's size. A stricter 3NF read could argue for a junction table instead;
+the size/shape of this specific data is the reason this project didn't take
+that path. (The constraint uses `cardinality()`, not `array_length(..., 1)`:
+`array_length` of an empty array returns `NULL`, and a `CHECK` expression
+that evaluates to `NULL` — as opposed to `FALSE` — passes, so an
+`array_length`-based check silently let an empty `data_qubits` array through
+until a test caught it. `cardinality()` returns `0` for an empty array, so
+the comparison actually evaluates to `FALSE`.)
+
+**Decision — full truncate-then-reload in one transaction, not upsert.**
+Each run of `load_qasmbench_gold` does
+`TRUNCATE TABLE gold_qasmbench_circuit RESTART IDENTITY CASCADE` (which
+clears `gold_qasmbench_register`, `gold_qasmbench_stabilizer_check`, and
+`gold_qasmbench_conditional_correction` too, since they all reference the
+circuit table), then re-inserts every row, all inside the one implicit
+transaction opened by `run_qasmbench_gold`'s
+`with connections.postgres_connection(settings) as connection:` (commits on
+a clean exit, rolls back on any exception). QASMBench's Gold slice is small
+(6 circuits, ~4 checks, ~6 corrections) and derived deterministically from
+an unchanged Bronze archive, so a full rebuild each run is simpler to reason
+about than a natural-key upsert and still satisfies "repeated runs on
+unchanged inputs must leave stable identifiers and must not add duplicate
+business records" — a rerun always lands on the same `circuit_id`s and row
+counts, and a failed run leaves the previous complete snapshot untouched.
+This mirrors google_qec's own truncate-then-reload strategy exactly.
+
+**Cross-source isolation.** None of these four tables reference
+`google_qec` or `qec_syndromes` Gold tables. That decision, and the evidence
+for it, is already recorded below under "Rejected candidate relationship" —
+not repeated here.
+
+---
+
 ## Rejected candidate relationship
 
 *Stage: Gold (this decides whether to create a cross-source relationship in
