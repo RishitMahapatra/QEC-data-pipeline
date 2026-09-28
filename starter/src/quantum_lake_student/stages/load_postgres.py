@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS gold_google_experiment ( --for each experiment direct
         detector_count        INTEGER NOT NULL CHECK (detector_count > 0), --bits per shot in detection_events.b8 
     CHECK (
         (distance = 3 AND detector_count = 200) OR (distance = 5 AND detector_count = 600)
-    ), -- This checks if the actual counts match the properties.yml where the fact is: For distance = 3, there will be 200 decoders and for distance = 5, there will be 600 decoders. PostgreSQL will automatically reject any files with mismatched distance and decoder count.
+    ), -- This checks if the actual counts match the properties.yml where the fact is: For distance = 3, there will be 200 detectors and for distance = 5, there will be 600 detectors. PostgreSQL will automatically reject any files with mismatched distance and detector count.
     
     UNIQUE(distance, rounds, center_row, center_col) -- this ensures that no two experiments can share the same distance/rounds/location 
 );
