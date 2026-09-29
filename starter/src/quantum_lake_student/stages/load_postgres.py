@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS syndrome_experiment (
     round_count         INT NOT NULL CHECK (round_count = 4),
     check_count         INT NOT NULL CHECK (check_count = 4)
 );
+COMMENT ON TABLE syndrome_experiment IS
+    'One row represents one simulated physical-fault-rate experiment (one source CSV file).';
 """
 
 # syndrome_pattern: one row per distinct 16-bit pattern, plus how many of its
@@ -37,6 +39,8 @@ CREATE TABLE IF NOT EXISTS syndrome_pattern (
     syndrome_bits          BYTEA PRIMARY KEY CHECK (encode(syndrome_bits, 'hex') ~ '^(0[01]){16}$'),
     triggered_check_count  INT NOT NULL CHECK (triggered_check_count BETWEEN 0 AND 16)
 );
+COMMENT ON TABLE syndrome_pattern IS
+    'One row represents one distinct 16-bit syndrome pattern, seen in any experiment.';
 """
 
 # main table, one row per (experiment, pattern, label) combination, points at both
@@ -53,6 +57,8 @@ CREATE TABLE IF NOT EXISTS syndrome_observation (
     source_record_id      TEXT NOT NULL UNIQUE,
     UNIQUE (experiment_id, syndrome_bits, logical_error_label)
 );
+COMMENT ON TABLE syndrome_observation IS
+    'One row represents one (experiment, syndrome pattern, logical-error label) combination and its quantity weight.';
 CREATE INDEX IF NOT EXISTS idx_syndrome_observation_experiment ON syndrome_observation (experiment_id);
 CREATE INDEX IF NOT EXISTS idx_syndrome_observation_syndrome_bits ON syndrome_observation (syndrome_bits);
 """

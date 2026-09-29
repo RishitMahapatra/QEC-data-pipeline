@@ -14,9 +14,12 @@ in schema `gold`:
 
 | Table | One row is | Rows on the supplied data |
 | --- | --- | --- |
-| `syndrome_experiment` | one physical-fault-rate simulation file | 7 |
-| `syndrome_pattern` | one distinct 16-bit syndrome pattern, seen anywhere in the dataset | (distinct across all 7 files) |
-| `syndrome_observation` | one (experiment, pattern, label) combination and its weight | 75,598 |
+| `syndrome_experiment` | one simulated physical-fault-rate experiment (one source CSV file) | 7 |
+| `syndrome_pattern` | one distinct 16-bit syndrome pattern, seen in any experiment | 31,941 |
+| `syndrome_observation` | one (experiment, syndrome pattern, logical-error label) combination and its quantity weight | 75,598 |
+
+The same sentences are stored in PostgreSQL as comments, so they
+can also be read from the database itself.
 
 ## Decision to use 3 tables
 
