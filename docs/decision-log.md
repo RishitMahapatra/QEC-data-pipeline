@@ -172,6 +172,103 @@ rejected); checks and corrections come only from accepted circuits.
 
 ---
 
+## qasmbench Gold design
+
+*Stage: Gold (`load_postgres.py`, `load_qasmbench_gold` / `_load_qasmbench`).
+Loads the three QASMBench Silver tables into four Postgres tables, scoped to
+QASMBench only for its own schema/rows — but as of the merge with
+`google_qec`'s and `qec_syndromes`' Gold code (from the team's
+`rishit_mahapatra` and `dari` branches), qasmbench loads inside the same
+single shared transaction as every other source, in `run()`. All three
+sources' code lives in one `load_postgres.py`, and qasmbench follows the
+same two-tier shape google_qec established: `load_qasmbench_gold(conn,
+settings)` is a connection-scoped loader (truncate + insert + return counts
+and hashes, no commit of its own), and `_load_qasmbench(conn, settings)`
+wraps it — runs the schema DDL, calls the loader, then re-queries the actual
+Gold tables and raises if they disagree with what the loader returned.*
+
+**Decision — table names and shared `gold` schema (team decision, resolved
+across all three sources together).** Tables are `gold_qasmbench_circuit`,
+`gold_qasmbench_register`, `gold_qasmbench_stabilizer_check`,
+`gold_qasmbench_conditional_correction`. `run()` does
+`CREATE SCHEMA IF NOT EXISTS gold` and `SET search_path TO gold` once, before
+loading any source, so every source's Gold tables — `gold_google_*`,
+`syndrome_*`, and `gold_qasmbench_*` alike — live in the same dedicated
+`gold` schema, not `public`. An earlier draft of this design put qasmbench's
+tables in their own `qec` schema; that was dropped once a teammate flagged
+during review that the team should pick one schema strategy together rather
+than each source doing its own thing, and `google_qec`'s and `qec_syndromes`'
+code (independently arriving at the same `gold` schema) was already the
+majority direction.
+
+**Decision — re-query the actual Gold table instead of trusting the
+loader's own count (also from that same review).** An earlier version of
+this code wrote `row_counts.json`'s `"gold_loaded"` field from the *same*
+Python variable as `"silver_rows"`, making `"match"` trivially always
+`True` — it never actually checked the database. `_load_qasmbench` now runs
+`SELECT COUNT(*)` against each of the four real tables after loading and
+compares that independent count to what `load_qasmbench_gold` returned;
+any disagreement raises `RuntimeError` *inside* the still-open transaction,
+which rolls back not just qasmbench's rows but every source loaded earlier
+in the same `run()` call (google_qec, syndromes) — proven by
+`test_load_qasmbench_detects_row_count_mismatch_and_raises` and
+`test_run_rolls_back_google_and_syndromes_when_qasmbench_load_fails`.
+
+**Decision — normalize `register_declarations` instead of copying it.**
+Silver's `circuit.parquet` keeps `register_declarations` as one JSON-text
+column (a nested list of qreg/creg name+size pairs). Gold decomposes it into
+its own table, `gold_qasmbench_register` (one row per declared register, FK
+to `gold_qasmbench_circuit`), instead of also carrying a JSONB copy of the
+same column. Two representations of the same fact with nothing to keep them
+in sync is worse than one; the brief says Gold must not "merely copy each
+Silver table into PostgreSQL", and turning an opaque JSON blob into typed,
+constrained (`register_size > 0`, `register_kind IN ('qreg','creg')`) rows is
+exactly that kind of value-add. Only 4 registers per circuit variant (q, a,
+c, syn for the parity-check benchmark) — decomposing costs one small table,
+not real complexity.
+
+**Decision — keep `data_qubits` as a native `text[]` column, not a junction
+table.** `stabilizer_check.parquet`'s `data_qubits` is a small (2 elements),
+fixed-shape, ordered attribute of one check row, not an independent
+many-to-many relationship worth its own table — across the whole QASMBench
+archive it's ~8 total (qubit, check) pairs.
+`gold_qasmbench_stabilizer_check.data_qubits` is `text[]` with
+`CHECK (cardinality(data_qubits) >= 1)`. Postgres arrays are queryable
+(`= ANY(data_qubits)`, `&&`) without the overhead of a fifth table for this
+data's size. A stricter 3NF read could argue for a junction table instead;
+the size/shape of this specific data is the reason this project didn't take
+that path. (The constraint uses `cardinality()`, not `array_length(..., 1)`:
+`array_length` of an empty array returns `NULL`, and a `CHECK` expression
+that evaluates to `NULL` — as opposed to `FALSE` — passes, so an
+`array_length`-based check silently let an empty `data_qubits` array through
+until a test caught it. `cardinality()` returns `0` for an empty array, so
+the comparison actually evaluates to `FALSE`.)
+
+**Decision — full truncate-then-reload, not upsert, inside the shared
+cross-source transaction.** Each call to `load_qasmbench_gold` does
+`TRUNCATE TABLE gold_qasmbench_circuit RESTART IDENTITY CASCADE` (which
+clears `gold_qasmbench_register`, `gold_qasmbench_stabilizer_check`, and
+`gold_qasmbench_conditional_correction` too, since they all reference the
+circuit table), then re-inserts every row. Unlike the design's first draft,
+this no longer opens its own connection/transaction — `run()` opens one
+connection, calls `_load_google`, `_load_syndromes`, then `_load_qasmbench`
+in sequence on it, and only commits once all three succeed (`conn.commit()`
+after the third call; any exception anywhere rolls back everything and the
+connection is closed in a `finally`). QASMBench's Gold slice is small
+(6 circuits, ~4 checks, ~6 corrections) and derived deterministically from
+an unchanged Bronze archive, so a full rebuild each run is simpler to reason
+about than a natural-key upsert and still satisfies "repeated runs on
+unchanged inputs must leave stable identifiers and must not add duplicate
+business records" — a rerun always lands on the same `circuit_id`s and row
+counts. This mirrors google_qec's own truncate-then-reload strategy exactly.
+
+**Cross-source isolation.** None of these four tables reference
+`google_qec` or `qec_syndromes` Gold tables. That decision, and the evidence
+for it, is already recorded below under "Rejected candidate relationship" —
+not repeated here.
+
+---
+
 ## Rejected candidate relationship
 
 *Stage: Gold (this decides whether to create a cross-source relationship in

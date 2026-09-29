@@ -11,6 +11,7 @@ Note: Repeated loads must not create duplicate records
 Sources loaded here, each into its own tables inside the shared `gold` schema:
 - google_qec     -> gold_google_experiment, gold_google_shot, gold_google_decoder, gold_google_decoder_prediction
 - qec_syndromes  -> syndrome_experiment, syndrome_pattern, syndrome_observation
+- qasmbench      -> gold_qasmbench_circuit, gold_qasmbench_register, gold_qasmbench_stabilizer_check, gold_qasmbench_conditional_correction
 run() loads every source in ONE transaction, so the whole Gold update is all-or-nothing.
 '''
 
@@ -20,6 +21,7 @@ run() loads every source in ONE transaction, so the whole Gold update is all-or-
 
 import hashlib # SHA-256 for Silver input hashes and syndrome observation ids
 import io #used to read the raw MinIO bytes so pyarrow can read them as a file
+import json # qasmbench's register_declarations Silver column is JSON text, decoded here
 
 import pyarrow as pa  # in-memory tabular data type used by Silver
 import pyarrow.parquet as pq  # reads Parquet files into pyarrow tables
@@ -406,6 +408,252 @@ def load_syndrome_tables(cursor, silver_table) -> None:
 
 
 # ---------------------------------------------------------------------------
+# qasmbench Gold tables
+#
+# Requirements this section is built against (assignment/data-sources.md's
+# qasmbench section and assignment/brief.md's Gold section, not google_qec's
+# shape): "at minimum, extract... parity-check ancilla, data participants,
+# and syndrome bit where explicit; syndrome-controlled correction value,
+# gate, and target" and "Keep QASMBench circuits as their own entities
+# because no row-level match to the experiments is supplied." qasmbench has
+# no google_qec-style cross-column fact to enforce (no distance<->detector
+# relationship); its data-driven rules are the two decisions below instead.
+# ---------------------------------------------------------------------------
+
+QASMBENCH_SOURCE_NAME = "qasmbench"
+
+# Register-decomposition decision: Silver's circuit.parquet keeps
+# register_declarations as one JSON-text column (a nested list of qreg/creg
+# name+size pairs). Gold decomposes it into its own table,
+# gold_qasmbench_register - one row per declared register - instead of also
+# carrying a JSONB copy of the same column. Two representations of the same
+# fact with nothing keeping them in sync is worse than one, and the brief
+# says Gold must not "merely copy each Silver table into PostgreSQL": turning
+# an opaque JSON blob into typed, constrained (register_size > 0,
+# register_kind IN ('qreg','creg')) rows is exactly that kind of value-add.
+
+# data_qubits-as-array decision: stabilizer_check.parquet's data_qubits is a
+# small (2 elements), fixed-shape, ordered attribute of one check row, not an
+# independent many-to-many relationship worth its own junction table - across
+# the whole qasmbench archive it is ~8 total (qubit, check) pairs.
+# gold_qasmbench_stabilizer_check.data_qubits stays a native TEXT[] column
+# with a CHECK that it is never empty (cardinality(), not array_length(...,1):
+# array_length of an empty array is NULL, and a NULL CHECK expression passes,
+# so an array_length-based check would silently let an empty array through).
+
+QASMBENCH_GOLD_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS gold_qasmbench_circuit ( -- one row per parsed QASMBench circuit variant
+    circuit_id            TEXT PRIMARY KEY, -- "<benchmark>:<variant>", already unique and stable
+    source_record_id      TEXT NOT NULL UNIQUE, -- traces which Silver row this Gold row came from
+    benchmark_name         TEXT NOT NULL, -- which of the 3 QASMBench circuits this is
+    variant                TEXT NOT NULL CHECK (variant IN ('source', 'transpiled')), -- as published, or after transpilation
+    qubit_count            INTEGER NOT NULL CHECK (qubit_count > 0), -- declared qubits must be positive
+    measurement_count      INTEGER NOT NULL CHECK (measurement_count >= 0), -- executed measure statements, expanded
+    two_qubit_gate_count   INTEGER NOT NULL CHECK (two_qubit_gate_count >= 0), -- executed 2-qubit gates, expanded
+
+    UNIQUE (benchmark_name, variant) -- a second uniqueness rule on the same fact as circuit_id, enforced independently
+);
+
+COMMENT ON TABLE gold_qasmbench_circuit IS
+    'One row represents one parsed QASMBench circuit variant (a benchmark, as published or after transpilation).';
+
+CREATE TABLE IF NOT EXISTS gold_qasmbench_register ( -- one row per declared qreg/creg of one circuit variant
+    circuit_id      TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE,
+    register_kind   TEXT NOT NULL CHECK (register_kind IN ('qreg', 'creg')), -- quantum or classical register
+    register_name   TEXT NOT NULL, -- e.g. "q", "a", "c", "syn"
+    register_size   INTEGER NOT NULL CHECK (register_size > 0), -- declared register width must be positive
+
+    PRIMARY KEY (circuit_id, register_kind, register_name) -- a register name is only unique within its own kind, within its own circuit
+);
+
+COMMENT ON TABLE gold_qasmbench_register IS
+    'One row represents one declared quantum or classical register of one circuit variant.';
+
+CREATE INDEX IF NOT EXISTS idx_qasmbench_register_circuit_id ON gold_qasmbench_register(circuit_id);
+
+CREATE TABLE IF NOT EXISTS gold_qasmbench_stabilizer_check ( -- one row per detected parity-check relationship
+    source_record_id  TEXT PRIMARY KEY, -- traces which Silver row this Gold row came from
+    circuit_id         TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE,
+    check_id            TEXT NOT NULL, -- "<ancilla_qubit>#<occurrence>", unique within its circuit
+    ancilla_qubit       TEXT NOT NULL, -- the qubit collecting the parity and being measured into syndrome_bit
+    data_qubits         TEXT[] NOT NULL CHECK (cardinality(data_qubits) >= 1), -- the data qubits whose parity this check measures
+    syndrome_bit         TEXT NOT NULL, -- the classical bit the ancilla is measured into
+
+    UNIQUE (circuit_id, check_id)
+);
+
+COMMENT ON TABLE gold_qasmbench_stabilizer_check IS
+    'One row represents one explicit parity-check relationship (ancilla, its data qubits, and the resulting syndrome bit) found in one circuit variant.';
+
+CREATE INDEX IF NOT EXISTS idx_qasmbench_stabilizer_check_circuit_id ON gold_qasmbench_stabilizer_check(circuit_id);
+
+CREATE TABLE IF NOT EXISTS gold_qasmbench_conditional_correction ( -- one row per syndrome-conditioned correction gate
+    source_record_id    TEXT PRIMARY KEY, -- traces which Silver row this Gold row came from
+    circuit_id            TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE,
+    condition_register    TEXT NOT NULL, -- the classical register the if(...) condition reads
+    condition_value        BIGINT NOT NULL CHECK (condition_value >= 0), -- the syndrome value that triggers this correction
+    gate                    TEXT NOT NULL, -- the single-qubit gate applied when the condition holds
+    target_qubit             TEXT NOT NULL -- which qubit the gate is applied to
+);
+
+COMMENT ON TABLE gold_qasmbench_conditional_correction IS
+    'One row represents one syndrome-conditioned correction gate applied to one target qubit in one circuit variant.';
+
+CREATE INDEX IF NOT EXISTS idx_qasmbench_conditional_correction_circuit_id ON gold_qasmbench_conditional_correction(circuit_id);
+"""
+
+
+def _register_rows(circuit_rows: list[dict]) -> list[tuple[str, str, str, int]]:
+    """Decompose every circuit row's register_declarations JSON text into one
+    tuple per declared register - the concrete step behind the
+    register-decomposition decision above."""
+    rows: list[tuple[str, str, str, int]] = []
+    for row in circuit_rows:
+        declarations = json.loads(row["register_declarations"])
+        for kind, key in (("qreg", "qregs"), ("creg", "cregs")):
+            for register in declarations.get(key, []):
+                rows.append((row["circuit_id"], kind, register["name"], register["size"]))
+    return rows
+
+
+def load_qasmbench_gold(conn, settings) -> tuple[int, int, int, int, str, str, str]:
+    # Args:
+    # conn: takes the PostgreSQL connection, settings = env config  returns
+    # (circuit count, register count, stabilizer-check count, correction
+    # count, circuit file hash, stabilizer_check file hash, conditional_correction file hash)
+
+    """Load Silver's qasmbench Parquet tables into Postgres, all-or-nothing.
+
+    Truncates gold_qasmbench_circuit first (CASCADE also clears
+    gold_qasmbench_register, gold_qasmbench_stabilizer_check, and
+    gold_qasmbench_conditional_correction, since they all reference it), then
+    inserts fresh - so a rerun never duplicates rows, and if anything fails
+    partway, the transaction rolls back and the previous complete data stays
+    in place. Mirrors load_google_gold's shape: reads its own Silver files
+    (with hashes), truncates, inserts, and returns counts + hashes for the
+    caller to reconcile and record.
+    """
+    circuit_table, circuit_hash = _read_silver_parquet_with_hash(settings, "silver/qasmbench/circuit.parquet")
+    stabilizer_table, stabilizer_hash = _read_silver_parquet_with_hash(
+        settings, "silver/qasmbench/stabilizer_check.parquet"
+    )
+    correction_table, correction_hash = _read_silver_parquet_with_hash(
+        settings, "silver/qasmbench/conditional_correction.parquet"
+    )
+
+    circuit_rows = circuit_table.to_pylist()
+    stabilizer_rows = stabilizer_table.to_pylist()
+    correction_rows = correction_table.to_pylist()
+    register_rows = _register_rows(circuit_rows)
+
+    with conn.cursor() as cur:  # TRUNCATE wipes all four Gold tables - CASCADE handles the dependency order automatically
+        cur.execute("TRUNCATE TABLE gold_qasmbench_circuit RESTART IDENTITY CASCADE;")
+
+        cur.executemany(
+            """
+            INSERT INTO gold_qasmbench_circuit
+                (circuit_id, source_record_id, benchmark_name, variant,
+                 qubit_count, measurement_count, two_qubit_gate_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (r["circuit_id"], r["source_record_id"], r["benchmark_name"], r["variant"],
+                 r["qubit_count"], r["measurement_count"], r["two_qubit_gate_count"])
+                for r in circuit_rows
+            ],
+        )
+
+        cur.executemany(
+            """
+            INSERT INTO gold_qasmbench_register
+                (circuit_id, register_kind, register_name, register_size)
+            VALUES (%s, %s, %s, %s)
+            """,
+            register_rows,
+        )
+
+        cur.executemany(
+            """
+            INSERT INTO gold_qasmbench_stabilizer_check
+                (source_record_id, circuit_id, check_id, ancilla_qubit, data_qubits, syndrome_bit)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (r["source_record_id"], r["circuit_id"], r["check_id"], r["ancilla_qubit"],
+                 list(r["data_qubits"]), r["syndrome_bit"])
+                for r in stabilizer_rows
+            ],
+        )
+
+        cur.executemany(
+            """
+            INSERT INTO gold_qasmbench_conditional_correction
+                (source_record_id, circuit_id, condition_register, condition_value, gate, target_qubit)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (r["source_record_id"], r["circuit_id"], r["condition_register"],
+                 r["condition_value"], r["gate"], r["target_qubit"])
+                for r in correction_rows
+            ],
+        )
+
+    return (
+        len(circuit_rows), len(register_rows), len(stabilizer_rows), len(correction_rows),
+        circuit_hash, stabilizer_hash, correction_hash,
+    )
+
+
+def _load_qasmbench(conn, settings) -> dict:
+    """Load qasmbench into Gold and check that every Silver row arrived exactly once.
+
+    Same shape as _load_google: run the schema DDL, load, then re-query the
+    actual Gold tables and raise if they disagree with what the loader
+    returned - so a silent drop rolls back the whole run() transaction
+    instead of being recorded as a false "match".
+    """
+    with conn.cursor() as cur:
+        cur.execute(QASMBENCH_GOLD_SCHEMA_SQL)
+
+    (circuit_count, register_count, check_count, correction_count,
+     circuit_hash, stabilizer_hash, correction_hash) = load_qasmbench_gold(conn, settings)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_circuit;")
+        gold_circuit_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_register;")
+        gold_register_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_stabilizer_check;")
+        gold_check_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_conditional_correction;")
+        gold_correction_count = cur.fetchone()[0]
+        if (gold_circuit_count, gold_register_count, gold_check_count, gold_correction_count) != (
+            circuit_count, register_count, check_count, correction_count
+        ):
+            raise RuntimeError(
+                f"Gold row counts do not match Silver: "
+                f"circuit {gold_circuit_count} vs {circuit_count}, "
+                f"register {gold_register_count} vs {register_count}, "
+                f"stabilizer_check {gold_check_count} vs {check_count}, "
+                f"conditional_correction {gold_correction_count} vs {correction_count}"
+            )
+
+    return {
+        "circuit_count": circuit_count,
+        "register_count": register_count,
+        "check_count": check_count,
+        "correction_count": correction_count,
+        "circuit_hash": circuit_hash,
+        "stabilizer_hash": stabilizer_hash,
+        "correction_hash": correction_hash,
+        "gold_circuit_count": gold_circuit_count,
+        "gold_register_count": gold_register_count,
+        "gold_check_count": gold_check_count,
+        "gold_correction_count": gold_correction_count,
+    }
+
+
+# ---------------------------------------------------------------------------
 # run(): loads every source into Gold as one all-or-nothing update
 # ---------------------------------------------------------------------------
 
@@ -518,9 +766,10 @@ def _load_syndromes(conn, settings) -> dict:
 def run(run_id: str) -> StageResult:
     """Load every source's Silver tables into Gold PostgreSQL as one all-or-nothing update.
 
-    google_qec and qec_syndromes are loaded in the same transaction: if either
-    source fails (a constraint, or a Silver/Gold count mismatch), nothing is
-    committed and the previous complete Gold data stays in place.
+    google_qec, qec_syndromes, and qasmbench are all loaded in the same
+    transaction: if any source fails (a constraint, or a Silver/Gold count
+    mismatch), nothing is committed and the previous complete Gold data
+    stays in place.
     """
     settings = Settings.from_environment()
     result = StageResult(stage="load_postgres", run_id=run_id)
@@ -533,6 +782,7 @@ def run(run_id: str) -> StageResult:
 
         google = _load_google(conn, settings)
         syndromes = _load_syndromes(conn, settings)
+        qasmbench = _load_qasmbench(conn, settings)
 
         conn.commit()
     except Exception:
@@ -541,10 +791,17 @@ def run(run_id: str) -> StageResult:
     finally:
         conn.close()
 
-    #input from silver stage (google experiment + shot, syndrome observations)
-    result.input_count = google["exp_count"] + google["shot_count"] + syndromes["silver_rows"]
-    #output from gold stage (google experiment + shot, syndrome observations)
-    result.output_count = google["gold_exp_count"] + google["gold_shot_count"] + syndromes["observation_count"]
+    #input from silver stage (google experiment + shot, syndrome observations, qasmbench circuits/checks/corrections)
+    result.input_count = (
+        google["exp_count"] + google["shot_count"] + syndromes["silver_rows"]
+        + qasmbench["circuit_count"] + qasmbench["check_count"] + qasmbench["correction_count"]
+    )
+    #output from gold stage (google experiment + shot, syndrome observations, qasmbench circuits/registers/checks/corrections)
+    result.output_count = (
+        google["gold_exp_count"] + google["gold_shot_count"] + syndromes["observation_count"]
+        + qasmbench["gold_circuit_count"] + qasmbench["gold_register_count"]
+        + qasmbench["gold_check_count"] + qasmbench["gold_correction_count"]
+    )
     result.issue_count = 0
     result.finish()
 
@@ -622,6 +879,39 @@ def run(run_id: str) -> StageResult:
                 }
                 for experiment_id in silver_quantity_by_experiment
             },
+        },
+    )
+
+    # --- qasmbench evidence ---
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "load_postgres", QASMBENCH_SOURCE_NAME,
+        payload={
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": result.started_at.isoformat(),
+            "finished_at": result.finished_at.isoformat(),
+            "input_hashes": {
+                "silver/qasmbench/circuit.parquet": qasmbench["circuit_hash"],
+                "silver/qasmbench/stabilizer_check.parquet": qasmbench["stabilizer_hash"],
+                "silver/qasmbench/conditional_correction.parquet": qasmbench["correction_hash"],
+            },
+            "output_row_counts": {
+                "gold_qasmbench_circuit": qasmbench["circuit_count"],
+                "gold_qasmbench_register": qasmbench["register_count"],
+                "gold_qasmbench_stabilizer_check": qasmbench["check_count"],
+                "gold_qasmbench_conditional_correction": qasmbench["correction_count"],
+            },
+        },
+    )
+    merge_json_file(
+        RESULTS_PART1 / "row_counts.json",
+        "load_postgres", QASMBENCH_SOURCE_NAME,
+        payload={
+            "circuit": {"silver_rows": qasmbench["circuit_count"], "gold_loaded": qasmbench["gold_circuit_count"], "match": qasmbench["gold_circuit_count"] == qasmbench["circuit_count"]},
+            "register": {"silver_rows": qasmbench["register_count"], "gold_loaded": qasmbench["gold_register_count"], "match": qasmbench["gold_register_count"] == qasmbench["register_count"]},
+            "stabilizer_check": {"silver_rows": qasmbench["check_count"], "gold_loaded": qasmbench["gold_check_count"], "match": qasmbench["gold_check_count"] == qasmbench["check_count"]},
+            "conditional_correction": {"silver_rows": qasmbench["correction_count"], "gold_loaded": qasmbench["gold_correction_count"], "match": qasmbench["gold_correction_count"] == qasmbench["correction_count"]},
         },
     )
 

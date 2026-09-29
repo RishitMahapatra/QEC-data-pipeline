@@ -14,9 +14,9 @@ exact per-experiment byte-length checks, detector_event_count <= detector_count,
 the basis-inclusive processor-location uniqueness rule, row-count
 reconciliation, and the all-or-nothing rollback guarantee.
 
-run() loads google_qec and qec_syndromes together in one transaction, so the
-run() tests also feed it a small in-memory syndromes table and point its
-GOLD_SCHEMA at the throwaway test schema.
+run() loads google_qec, qec_syndromes, and qasmbench together in one
+transaction, so the run() tests also feed it small in-memory syndromes and
+qasmbench tables and point its GOLD_SCHEMA at the throwaway test schema.
 """
 
 from __future__ import annotations
@@ -108,10 +108,58 @@ SYNDROME_ROWS = [
 ]
 
 
-def _fake_read_all_sources(_settings, object_name: str, syndrome_rows=SYNDROME_ROWS) -> tuple[pa.Table, str]:
-    """Fake Silver reader for run(): syndromes for the qec_syndromes path, Google otherwise."""
+# Minimal qasmbench Silver rows (qec_sm_n5-shaped), needed because run()
+# loads all three sources together
+ONE_QASMBENCH_CIRCUIT = [{
+    "source_record_id": "circ-src-1", "circuit_id": "qec_sm_n5:source",
+    "benchmark_name": "qec_sm_n5", "variant": "source",
+    "register_declarations": json.dumps({
+        "qregs": [{"name": "q", "size": 3}, {"name": "a", "size": 2}],
+        "cregs": [{"name": "c", "size": 3}, {"name": "syn", "size": 2}],
+    }),
+    "qubit_count": 5, "measurement_count": 5, "two_qubit_gate_count": 4,
+}]
+TWO_QASMBENCH_CHECKS = [
+    {
+        "source_record_id": "circ-src-1::stabilizer::a[0]#0", "circuit_id": "qec_sm_n5:source",
+        "check_id": "a[0]#0", "ancilla_qubit": "a[0]", "data_qubits": ["q[0]", "q[1]"], "syndrome_bit": "syn[0]",
+    },
+    {
+        "source_record_id": "circ-src-1::stabilizer::a[1]#0", "circuit_id": "qec_sm_n5:source",
+        "check_id": "a[1]#0", "ancilla_qubit": "a[1]", "data_qubits": ["q[1]", "q[2]"], "syndrome_bit": "syn[1]",
+    },
+]
+THREE_QASMBENCH_CORRECTIONS = [
+    {
+        "source_record_id": "circ-src-1::correction::0", "circuit_id": "qec_sm_n5:source",
+        "condition_register": "syn", "condition_value": 1, "gate": "x", "target_qubit": "q[0]",
+    },
+    {
+        "source_record_id": "circ-src-1::correction::1", "circuit_id": "qec_sm_n5:source",
+        "condition_register": "syn", "condition_value": 2, "gate": "x", "target_qubit": "q[2]",
+    },
+    {
+        "source_record_id": "circ-src-1::correction::2", "circuit_id": "qec_sm_n5:source",
+        "condition_register": "syn", "condition_value": 3, "gate": "x", "target_qubit": "q[1]",
+    },
+]
+
+
+def _fake_read_all_sources(
+    _settings, object_name: str, syndrome_rows=SYNDROME_ROWS, qasmbench_circuits=ONE_QASMBENCH_CIRCUIT
+) -> tuple[pa.Table, str]:
+    """Fake Silver reader for run(): syndromes for the qec_syndromes path,
+    qasmbench for its path, Google otherwise."""
     if "qec_syndromes" in object_name:
         table = pa.Table.from_pylist(syndrome_rows, schema=SYNDROMES_SILVER_SCHEMA)
+        return table, f"fake-hash-{object_name}"
+    if "qasmbench" in object_name:
+        if "stabilizer_check" in object_name:
+            table = pa.Table.from_pylist(TWO_QASMBENCH_CHECKS)
+        elif "conditional_correction" in object_name:
+            table = pa.Table.from_pylist(THREE_QASMBENCH_CORRECTIONS)
+        else:
+            table = pa.Table.from_pylist(qasmbench_circuits)
         return table, f"fake-hash-{object_name}"
     return _fake_read_with_hash(_settings, object_name)
 
@@ -566,7 +614,8 @@ def test_run_writes_gold_and_run_evidence(pg_schema, monkeypatch, tmp_path) -> N
     result = lp.run("gold-test-run")
 
     # 1 experiment + 2 shots (google_qec) + 2 observations (qec_syndromes)
-    assert (result.stage, result.output_count) == ("load_postgres", 5)
+    # + 1 circuit + 4 registers + 2 checks + 3 corrections (qasmbench)
+    assert (result.stage, result.output_count) == ("load_postgres", 5 + 10)
     assert (results_root / "run.json").exists()
     assert (results_root / "row_counts.json").exists()
 
@@ -588,13 +637,29 @@ def test_run_writes_gold_and_run_evidence(pg_schema, monkeypatch, tmp_path) -> N
         assert cur.fetchone()[0] == 8
         cur.execute("SELECT COUNT(*) FROM syndrome_observation;")
         assert cur.fetchone()[0] == 2
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_circuit;")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_register;")
+        assert cur.fetchone()[0] == 4
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_stabilizer_check;")
+        assert cur.fetchone()[0] == 2
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_conditional_correction;")
+        assert cur.fetchone()[0] == 3
 
-    # both sources write their own evidence into the shared results files
+    # every source writes its own evidence into the shared results files
     syndromes_counts = json.loads((results_root / "row_counts.json").read_text())["load_postgres"]["qec_syndromes"]
     assert syndromes_counts["rows_match"] is True
     assert syndromes_counts["quantity_match"] is True
     syndromes_run = json.loads((results_root / "run.json").read_text())["load_postgres"]["qec_syndromes"]
     assert syndromes_run["input_hash"].startswith("fake-hash-")
+
+    qasmbench_counts = json.loads((results_root / "row_counts.json").read_text())["load_postgres"]["qasmbench"]
+    assert qasmbench_counts["circuit"]["match"] is True
+    assert qasmbench_counts["register"]["match"] is True
+    assert qasmbench_counts["stabilizer_check"]["match"] is True
+    assert qasmbench_counts["conditional_correction"]["match"] is True
+    qasmbench_run = json.loads((results_root / "run.json").read_text())["load_postgres"]["qasmbench"]
+    assert qasmbench_run["input_hashes"]["silver/qasmbench/circuit.parquet"].startswith("fake-hash-")
 
 
 def test_run_detects_row_count_mismatch_and_rolls_back(pg_schema, monkeypatch, tmp_path) -> None:
@@ -673,6 +738,48 @@ def test_run_rolls_back_google_when_syndromes_load_fails(pg_schema, monkeypatch,
         cur.execute(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
             "WHERE table_schema = %s AND table_name = 'gold_google_experiment');",
+            (schema_name,),
+        )
+        assert cur.fetchone()[0] is False
+    assert not (tmp_path / "results" / "part1" / "run.json").exists()
+
+
+def test_run_rolls_back_google_and_syndromes_when_qasmbench_load_fails(pg_schema, monkeypatch, tmp_path) -> None:
+    """All three sources load in one transaction: if the qasmbench part
+    fails (here: an empty data_qubits array violates its CHECK), the Google
+    and syndromes tables loaded earlier in the same run must be rolled back
+    too - mirrors test_run_rolls_back_google_when_syndromes_load_fails."""
+    settings, schema_name, _fixture_conn = pg_schema
+
+    bad_qasmbench_checks = [{**TWO_QASMBENCH_CHECKS[0], "data_qubits": []}]
+
+    def _fake_read_bad_qasmbench(_settings, object_name: str):
+        if "qasmbench" in object_name and "stabilizer_check" in object_name:
+            return pa.Table.from_pylist(bad_qasmbench_checks), f"fake-hash-{object_name}"
+        return _fake_read_all_sources(_settings, object_name)
+
+    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_bad_qasmbench)
+    monkeypatch.setattr(lp, "GOLD_SCHEMA", schema_name)
+
+    def _test_postgres_connection(_settings):
+        return psycopg.connect(settings.postgres_dsn)
+
+    monkeypatch.setattr(lp.connections, "postgres_connection", _test_postgres_connection)
+    monkeypatch.setattr(lp, "RESULTS_PART1", tmp_path / "results" / "part1")
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        lp.run("gold-test-qasmbench-fail")
+
+    with _fixture_conn.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = %s AND table_name = 'gold_google_experiment');",
+            (schema_name,),
+        )
+        assert cur.fetchone()[0] is False
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = %s AND table_name = 'syndrome_observation');",
             (schema_name,),
         )
         assert cur.fetchone()[0] is False
