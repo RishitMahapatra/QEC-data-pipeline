@@ -22,26 +22,47 @@ Yes — enforced by code, not just sampled. `register_sources.py`'s
 every time the Bronze stage runs, so it can't silently regress.
 
 ### Does every parsed sequence have the same round/check shape and binary domain? — *Stage: Silver (shape/domain check in `prepare_data.py`)*
-TODO — confirmed for row 0 of `d-3_pfr-0.000010_nb-10M.csv` only so far.
-Needs checking across all rows, all 7 files.
+Done — confirmed across all 7 files, not just row 0. `build_syndromes`
+rejects any row whose parsed `syndromes` value isn't exactly 4 tuples of 4
+binary values (`syndromes.shape`); running it against the real Bronze zip
+(`test_accepted_quantity_reconciles_to_filename_hint_on_real_bronze_zip`)
+produces 0 `syndromes.shape` issues across the whole dataset.
 
 ### Do quantities reconcile to the filename sample count? — *Stage: Silver (positive-quantity + 10M reconciliation check)*
-TODO — confirmed `sum(quantity) == 10,000,000` for `d-3_pfr-0.000010_nb-10M.csv`
-(matches `nb-10M`) only so far. Needs checking across all 7 files.
+Done — confirmed across all 7 files, not just one. Total accepted `quantity`
+across the real dataset is ~70,000,000, within 2% of the combined `nb-10M`
+filename hints (7 files × ~10M), and 0
+`syndromes.weighted_total_reconciliation` warnings are raised on the
+supplied data. See `reports/silver_stage/silver_stage_syndromes.md`.
 
 ### Can the same syndrome occur under both logical-error labels? — *Stage: Silver (must accept both rows as valid, not dedupe)*
-TODO — `d-3_pfr-0.000010_nb-10M.csv` showed 0/68 collisions (no syndrome seen
-under both labels in that file). Must re-run across all 7 files, especially
-higher fault-rate ones, before concluding either way.
+Done. Yes — confirmed against the real Gold data, not just a synthetic test
+case. `test_same_syndrome_both_labels_are_both_kept` proves the code never
+dedupes a collision; querying the real dataset
+(`SELECT syndrome_bits FROM syndrome_observation GROUP BY syndrome_bits HAVING COUNT(DISTINCT logical_error_label) > 1`)
+shows **18,676 distinct patterns** occur under both labels across the 7
+files — this is common, not a rare edge case. Both rows are correctly
+retained for each one, not deduped.
 
 ### What is the correct key if syndrome alone is not unique? — *Stage: Silver (`source_record_id` design for `syndrome_observation.parquet`)*
-TODO — candidate: `(experiment_id, syndromes, labels)`, where `experiment_id`
-derives from the file (distance + physical fault rate). Verify this composite
-is actually unique per file (no duplicate aggregate rows).
+Resolved, differently than the original candidate. Silver's
+`source_record_id` is `sha256(filename:row_index)` — a hash of the row's
+*position* in its source file, not a hash of its content
+`(experiment_id, syndromes, labels)`. This is simpler and still fully stable
+(same file + same row position -> same id on every rerun), and doesn't
+require re-hashing the full syndrome value. The content-based composite key
+idea was used instead at the Gold layer: `syndrome_observation.observation_id`
+is `sha256(experiment_id:syndrome_bits:label)`, matching this table's
+`UNIQUE (experiment_id, syndrome_bits, logical_error_label)` constraint. See
+`reports/gold_stage/gold_stage_syndromes.md`, decision 4.
 
 ### Which aggregates must use `quantity` as a weight? — *Stage: Gold/ML (Silver only carries `quantity` through unchanged)*
-TODO — e.g. logical-error rate per fault rate must be
-`sum(quantity where label) / sum(quantity)`, not a row count.
+Done for Gold's analysis query. `reports/gold_stage/query1_weighted_syndrome_by_fault_rate.sql`
+computes exactly `sum(quantity) GROUP BY (physical_fault_rate, logical_error_label)`
+— confirms the weighted, not row-count, logical-error share rises from
+~0.02% at fault rate 0.00001 to ~18.6% at 0.01. Still open: which ML-side
+(Part II) aggregations need the same weighting — that's Victor's stage, not
+yet checked against this.
 
 ### Why must a model split keep an entire physical-fault-rate group together? — *Stage: Part II (ML split design, not a cleaning question)*
 TODO

@@ -303,10 +303,15 @@ intentional, evidence-based design decision, not an oversight.
 
 ---
 
-## 10. Open items (team-level, not resolved in this document)
+## 10. Shared Gold schema and open items
 
-- Whether Gold tables should live in a dedicated `gold` schema instead of
-  `public`
+All Gold tables now live in the dedicated `gold` schema, not `public`.
+`run()` loads `google_qec` and `qec_syndromes` in the same transaction, so
+the whole Gold update is all-or-nothing across both sources: if either one
+fails, neither is committed.
+
+Still open at team level:
+
 - Shared cross-source vocabulary (e.g. a common `code_family` table, a
   consistently-named `distance` column across all three sources) —
   needed before any cross-source query or comparison can be written

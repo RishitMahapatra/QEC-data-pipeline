@@ -13,6 +13,10 @@ each shot's copied measurement_count/detector_count back to its experiment,
 exact per-experiment byte-length checks, detector_event_count <= detector_count,
 the basis-inclusive processor-location uniqueness rule, row-count
 reconciliation, and the all-or-nothing rollback guarantee.
+
+run() loads google_qec and qec_syndromes together in one transaction, so the
+run() tests also feed it a small in-memory syndromes table and point its
+GOLD_SCHEMA at the throwaway test schema.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import pytest
 
 from quantum_lake_student.config import Settings
 from quantum_lake_student.stages import load_postgres as lp
+from quantum_lake_student.stages.prepare_data import SYNDROMES_SILVER_SCHEMA
 
 
 @pytest.fixture
@@ -86,6 +91,29 @@ def _fake_read(_settings, object_name: str) -> pa.Table:
 def _fake_read_with_hash(_settings, object_name: str) -> tuple[pa.Table, str]:
     table = _fake_read(_settings, object_name)
     return table, f"fake-hash-{object_name}"
+
+
+# Minimal qec_syndromes Silver rows, needed because run() loads both sources
+SYNDROME_ROWS = [
+    {
+        "source_record_id": "syn-src-0", "experiment_id": "syn-exp-1", "physical_fault_rate": 0.0001,
+        "syndrome_bits": bytes([0] * 6 + [1] + [0] * 9), "round_count": 4, "check_count": 4,
+        "logical_error_label": False, "quantity": 100,
+    },
+    {
+        "source_record_id": "syn-src-1", "experiment_id": "syn-exp-1", "physical_fault_rate": 0.0001,
+        "syndrome_bits": bytes([0] * 6 + [1] + [0] * 9), "round_count": 4, "check_count": 4,
+        "logical_error_label": True, "quantity": 30,
+    },
+]
+
+
+def _fake_read_all_sources(_settings, object_name: str, syndrome_rows=SYNDROME_ROWS) -> tuple[pa.Table, str]:
+    """Fake Silver reader for run(): syndromes for the qec_syndromes path, Google otherwise."""
+    if "qec_syndromes" in object_name:
+        table = pa.Table.from_pylist(syndrome_rows, schema=SYNDROMES_SILVER_SCHEMA)
+        return table, f"fake-hash-{object_name}"
+    return _fake_read_with_hash(_settings, object_name)
 
 
 def _insert_experiment(cur, **overrides) -> None:
@@ -522,7 +550,8 @@ def test_failed_load_keeps_previous_data_intact(pg_schema, monkeypatch) -> None:
 def test_run_writes_gold_and_run_evidence(pg_schema, monkeypatch, tmp_path) -> None:
     settings, schema_name, _fixture_conn = pg_schema
 
-    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_with_hash)
+    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_all_sources)
+    monkeypatch.setattr(lp, "GOLD_SCHEMA", schema_name)
 
     def _test_postgres_connection(_settings):
         c = psycopg.connect(settings.postgres_dsn)
@@ -536,7 +565,8 @@ def test_run_writes_gold_and_run_evidence(pg_schema, monkeypatch, tmp_path) -> N
 
     result = lp.run("gold-test-run")
 
-    assert (result.stage, result.output_count) == ("load_postgres", 3)
+    # 1 experiment + 2 shots (google_qec) + 2 observations (qec_syndromes)
+    assert (result.stage, result.output_count) == ("load_postgres", 5)
     assert (results_root / "run.json").exists()
     assert (results_root / "row_counts.json").exists()
 
@@ -556,6 +586,15 @@ def test_run_writes_gold_and_run_evidence(pg_schema, monkeypatch, tmp_path) -> N
         assert cur.fetchone()[0] == 2
         cur.execute("SELECT COUNT(*) FROM gold_google_decoder_prediction;")
         assert cur.fetchone()[0] == 8
+        cur.execute("SELECT COUNT(*) FROM syndrome_observation;")
+        assert cur.fetchone()[0] == 2
+
+    # both sources write their own evidence into the shared results files
+    syndromes_counts = json.loads((results_root / "row_counts.json").read_text())["load_postgres"]["qec_syndromes"]
+    assert syndromes_counts["rows_match"] is True
+    assert syndromes_counts["quantity_match"] is True
+    syndromes_run = json.loads((results_root / "run.json").read_text())["load_postgres"]["qec_syndromes"]
+    assert syndromes_run["input_hash"].startswith("fake-hash-")
 
 
 def test_run_detects_row_count_mismatch_and_rolls_back(pg_schema, monkeypatch, tmp_path) -> None:
@@ -577,7 +616,8 @@ def test_run_detects_row_count_mismatch_and_rolls_back(pg_schema, monkeypatch, t
         real = real_load_google_gold(conn, settings)
         return (real[0], real[1] + 1, real[2], real[3], real[4])  # lie: claim one extra shot
 
-    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_with_hash)
+    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_all_sources)
+    monkeypatch.setattr(lp, "GOLD_SCHEMA", schema_name)
     monkeypatch.setattr(lp, "load_google_gold", _lying_load_google_gold)
 
     def _test_postgres_connection(_settings):
@@ -604,3 +644,36 @@ def test_run_detects_row_count_mismatch_and_rolls_back(pg_schema, monkeypatch, t
         "the failed run's transaction (schema creation + insert) should have "
         "been fully rolled back, leaving no gold_google_experiment table at all"
     )
+
+
+def test_run_rolls_back_google_when_syndromes_load_fails(pg_schema, monkeypatch, tmp_path) -> None:
+    """Both sources load in one transaction: if the syndromes part fails
+    (here: a quantity of 0 violates its CHECK), the Google tables loaded
+    earlier in the same run must be rolled back too."""
+    settings, schema_name, _fixture_conn = pg_schema
+
+    bad_syndrome_rows = [{**SYNDROME_ROWS[0], "quantity": 0}]
+
+    def _fake_read_bad_syndromes(_settings, object_name: str):
+        return _fake_read_all_sources(_settings, object_name, syndrome_rows=bad_syndrome_rows)
+
+    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_bad_syndromes)
+    monkeypatch.setattr(lp, "GOLD_SCHEMA", schema_name)
+
+    def _test_postgres_connection(_settings):
+        return psycopg.connect(settings.postgres_dsn)
+
+    monkeypatch.setattr(lp.connections, "postgres_connection", _test_postgres_connection)
+    monkeypatch.setattr(lp, "RESULTS_PART1", tmp_path / "results" / "part1")
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        lp.run("gold-test-syndromes-fail")
+
+    with _fixture_conn.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = %s AND table_name = 'gold_google_experiment');",
+            (schema_name,),
+        )
+        assert cur.fetchone()[0] is False
+    assert not (tmp_path / "results" / "part1" / "run.json").exists()
