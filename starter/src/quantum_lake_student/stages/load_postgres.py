@@ -1,5 +1,5 @@
 '''
-This code file is for the integration of relational database
+This code file is for the integration of relational database 
 
 According to the rubrics, it includes:
 1) creation of the user defined tables
@@ -7,89 +7,37 @@ According to the rubrics, it includes:
 3) includes value checks and indexes
 
 Note: Repeated loads must not create duplicate records
+
+Sources loaded here, each into its own tables inside the shared `gold` schema:
+- google_qec     -> gold_google_experiment, gold_google_shot, gold_google_decoder, gold_google_decoder_prediction
+- qec_syndromes  -> syndrome_experiment, syndrome_pattern, syndrome_observation
+- qasmbench      -> gold_qasmbench_circuit, gold_qasmbench_register, gold_qasmbench_stabilizer_check, gold_qasmbench_conditional_correction
+run() loads every source in ONE transaction, so the whole Gold update is all-or-nothing.
 '''
 
-# Detector storage decision (google_qec): detector_bits is stored as one packed BYTEA value per shot row,
-# not one row per individual detector. Distance-3 has 200 detectors/shot (25 bytes packed),
-# distance-5 has 600 (75 bytes). Across all 250,000 shots that is
-# (200,000 x 25) + (50,000 x 75) = 8,750,000 bytes. One row per detector would instead need
-# (200 x 200,000) + (600 x 50,000) = 70,000,000 rows (~280x more), for data that no required
-# query or ML table needs at single-detector granularity.
+# Detector storage decision: detector_bits is stored as one packed BYTEA value per shot row,
+# not one row per individual detector (200 detectors = 25 bytes for distance 3, 600 = 75 bytes
+# for distance 5). Full reasoning and measured sizes: reports/gold_stage/gold_stage_google_qec.md
 
-# qasmbench does not have this problem: the whole archive is 3 benchmarks x 2 variants = 6
-# circuits, with at most a handful of parity checks/corrections per circuit. Nothing here is
-# large enough to need a packing decision; the design questions for qasmbench are instead about
-# *shape* (see the two comment blocks right above QASMBENCH_GOLD_SCHEMA_SQL below).
-
-import io  # used to read the raw MinIO bytes so pyarrow can read them as a file
-import json  # qasmbench's register_declarations Silver column is JSON text, decoded here
+import hashlib # SHA-256 for Silver input hashes and syndrome observation ids
+import io #used to read the raw MinIO bytes so pyarrow can read them as a file
+import json # qasmbench's register_declarations Silver column is JSON text, decoded here
 
 import pyarrow as pa  # in-memory tabular data type used by Silver
 import pyarrow.parquet as pq  # reads Parquet files into pyarrow tables
 
-from quantum_lake_student import connections  # for connections.postgres_connection() / minio_client()
+from quantum_lake_student import connections # for postgres_connection() helper
 from quantum_lake_student.config import Settings
+from quantum_lake_student.connections import minio_client #for creation of minio client
 from quantum_lake_student.models import RESULTS_PART1, StageResult, merge_json_file, code_revision
+from quantum_lake_student.stages.prepare_data import SILVER_SYNDROMES_PATH
 
 '''
 For the google_qec gold stage -> takes the two validated silver parquet tables. Since Parquet tables are for indexing and storage, running queries is not handled. For that reason, we implement PostgreSQL at the gold stage. Takes the two validated Silver Parquet tables
 (experiment.parquet, shot.parquet) and loads them into real PostgreSQL tables that enforce keys, foreign keys, and CHECK constraints.
 
 Load is all-or-nothing (rollback on any failure), and idempotent (rerun replaces the rows, doesn't duplicate).
-
-For the qasmbench gold stage -> takes the three validated silver parquet tables
-(circuit.parquet, stabilizer_check.parquet, conditional_correction.parquet) and loads them the
-same way: real PostgreSQL tables with keys/foreign keys/CHECK constraints, an all-or-nothing
-load, and an idempotent rerun. See the comment blocks above QASMBENCH_GOLD_SCHEMA_SQL for what
-is different about qasmbench's shape compared to google_qec's, and why.
-
-Each source is its own all-or-nothing unit (own schema DDL, own truncate-and-reload
-transaction, own row_counts.json/run.json entry) - a failure loading one source does not touch
-the other source's already-committed Gold tables. run() at the bottom just calls both and adds
-up the totals, the same way prepare_data.py's Silver run() calls each source's own builder and
-sums their counts.
 '''
-
-# ---------------------------------------------------------------------------
-# Shared lake-read helper - both sources' Silver output is read the same way,
-# so there is exactly one seam (`_read_silver_parquet`) that both load
-# functions call and that tests monkeypatch to inject canned Silver data.
-# ---------------------------------------------------------------------------
-
-
-def _read_lake_object(settings: Settings, object_name: str) -> bytes:
-    """Read one arbitrary object from the lake (MinIO bucket, or the local lake
-    folder). Gold reads objects at the exact path Silver wrote them to, so unlike
-    Bronze reads there is no bronze/raw prefix swap to do here."""
-    if settings.lake_backend == "local":
-        path = settings.local_lake_root / object_name
-        if not path.exists():
-            raise FileNotFoundError(f"Lake object not found: {path}")
-        return path.read_bytes()
-    client = connections.minio_client(settings)
-    response = client.get_object(settings.s3_bucket, object_name)
-    try:
-        return response.read()
-    finally:
-        response.close()
-        response.release_conn()
-
-
-def _read_silver_parquet(settings: Settings, object_name: str) -> pa.Table:
-    """Read one Silver Parquet table from the lake as a pyarrow Table.
-
-    Both google_qec's and qasmbench's load functions call this with their own
-    object paths; it is the one function tests monkeypatch to hand a load
-    function canned in-memory Silver rows instead of touching MinIO or a real
-    local lake folder.
-    """
-    return pq.read_table(io.BytesIO(_read_lake_object(settings, object_name)))
-
-
-# ---------------------------------------------------------------------------
-# google_qec Gold: gold_google_experiment, gold_google_shot, gold_google_decoder,
-# gold_google_decoder_prediction
-# ---------------------------------------------------------------------------
 
 # DECODER_NAMES: the four decoders supplied for google_qec. Pulled out as a module-level constant so both the schema design and the load logic agree on the same four names
 DECODER_NAMES = (
@@ -99,41 +47,55 @@ DECODER_NAMES = (
     "tensor_network_contraction",
 )
 
-# The DDL that creates both Gold tables: gold_google_experiment and gold_google_shot. Using IF NOT EXISTS to carry out no operations if the table already exists -> Safer choice
+# The DDL that creates both Gold tables: gold_google_experiment and gold_google_shot. Using IF NOT EXISTS to carry out no operations if the table already exists -> Safer choice 
 #gold_google_experiment has one row for one experiment, whereas gold_google_shot has many rows for a single experiment
 GOOGLE_GOLD_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS gold_google_experiment ( --for each experiment directory
     experiment_id       TEXT PRIMARY KEY, -- one row per experiment
-    source_record_id TEXT NOT NULL, -- traces which Silver row this Gold row came from
+    source_record_id TEXT NOT NULL UNIQUE, -- traces which Silver row this Gold row came from
     basis                TEXT NOT NULL CHECK (basis in('X','Z')), -- logical measurement basis, only X or Z
-    distance             INTEGER NOT NULL CHECK (distance > 0), --the distance must be positive
+    distance             INTEGER NOT NULL CHECK (distance > 0), --the distance must be positive 
     rounds                INTEGER NOT NULL CHECK (rounds > 0), -- QEC rounds must be positive
     shots                 INTEGER NOT NULL CHECK (shots > 0), --shot count must be positive
     center_row            INTEGER NOT NULL, -- processor location, row coordinate
     center_col            INTEGER NOT NULL, --processor location, column coordinate
     measurement_count     INTEGER NOT NULL CHECK (measurement_count > 0), --bits per shot in measurements.b8
-        detector_count        INTEGER NOT NULL CHECK (detector_count > 0), --bits per shot in detection_events.b8
+        detector_count        INTEGER NOT NULL CHECK (detector_count > 0), --bits per shot in detection_events.b8 
     CHECK (
         (distance = 3 AND detector_count = 200) OR (distance = 5 AND detector_count = 600)
     ), -- This checks if the actual counts match the properties.yml where the fact is: For distance = 3, there will be 200 detectors and for distance = 5, there will be 600 detectors. PostgreSQL will automatically reject any files with mismatched distance and detector count.
-
-    UNIQUE(distance, rounds, center_row, center_col) -- this ensures that no two experiments can share the same distance/rounds/location
+    
+      UNIQUE(basis,distance, rounds, center_row, center_col), -- this ensures that no two experiments can share the same basis/distance/rounds/location
+    UNIQUE (experiment_id, measurement_count, detector_count) -- required so gold_google_shot's composite foreign key can reference this exact triple
 );
 
 COMMENT ON TABLE gold_google_experiment IS
     'One row represents one Google hardware experiment configuration (a distance/rounds/processor-location combination).';
 
 CREATE TABLE IF NOT EXISTS gold_google_shot ( -- for the single shots
-    experiment_id                          TEXT NOT NULL REFERENCES gold_google_experiment(experiment_id),
-    source_record_id TEXT NOT NULL, -- traces which Silver row this Gold row came from
+    experiment_id                          TEXT NOT NULL REFERENCES gold_google_experiment(experiment_id), 
+    measurement_count INTEGER NOT NULL,  -- copied from the experiment row so byte-length checks below can reference it without a cross-table query
+    detector_count INTEGER NOT NULL, -- same reasoning as the above -> measurement count 
+    source_record_id TEXT NOT NULL UNIQUE, -- traces which Silver row this Gold row came from
     shot_index                             INTEGER NOT NULL CHECK (shot_index >= 0), -- can be zero based and non negative
-    measurement_bits                       BYTEA NOT NULL, --raw packed bits for this shot
+    
     sweep_bits                             BYTEA NOT NULL, -- configuration bits for this shot
-    detector_bits                          BYTEA NOT NULL CHECK (octet_length(detector_bits) IN (25, 75)), -- derived detector events; 25 bytes for d3, 75 bytes for d5
+        detector_bits                          BYTEA NOT NULL CHECK (octet_length(detector_bits) = CEIL(detector_count / 8.0)), -- must match THIS shot's own detector_count exactly, not just any valid length
+    
+    measurement_bits                       BYTEA NOT NULL CHECK (octet_length(measurement_bits) = CEIL(measurement_count / 8.0)), -- same idea for measurement bits
+    
+        detector_event_count                   INTEGER NOT NULL CHECK (detector_event_count >= 0 AND detector_event_count <= detector_count), --counts the set of detector bits; can never exceed the total number of detectors
+    actual_observable_flip                 BOOLEAN NOT NULL, --ground truth outcome 
+    PRIMARY KEY (experiment_id, shot_index),  -- composite: a shot is only unique WITHIN its experiment
 
-    detector_event_count                   INTEGER NOT NULL CHECK (detector_event_count >= 0), --counts the set of detector bits
-    actual_observable_flip                 BOOLEAN NOT NULL, --ground truth outcome
-    PRIMARY KEY (experiment_id, shot_index)  -- composite: a shot is only unique WITHIN its experiment
+    
+
+    --adding the foreign key: to enforce that these copies actually match the real experiment row
+    FOREIGN KEY(experiment_id, measurement_count, detector_count)
+        REFERENCES gold_google_experiment (experiment_id, measurement_count, detector_count)
+        -- if a shot's copied counts don't match the actual experiment row, the insert is rejected
+
+      
 );
 -- NOTE: the four decoder prediction columns from Silver live in gold_google_decoder_prediction below, so that "what a decoder guessed" and "whether it was wrong" are their own table instead of four repeated yes/no columns on shot
 
@@ -168,52 +130,99 @@ COMMENT ON TABLE gold_google_decoder_prediction IS
 CREATE INDEX IF NOT EXISTS idx_decoder_prediction_decoder ON gold_google_decoder_prediction(decoder_name);
 """
 
+def _read_silver_parquet(settings, object_name: str) -> pa.Table: #this is a helper function
+    """Read one Silver Parquet table from the lake (MinIO bucket or local lake folder)."""
 
-def load_google_gold(conn, settings) -> tuple[int, int, int]:  # this function loads the silver data to gold
+    # Defines a helper function. Takes 2 inputs (settings = env config, object_name = which file to read) and returns a pyarrow Table (a tabular data structure like a DataFrame).
+    
+    #There are two files maintained, local-disk lake (test/dev) and MinIO (real environment).
+    if settings.lake_backend == "local":
+        #opening the local backend file as parquet table only 
+        return pq.read_table(settings.local_lake_root / object_name)
+    # MinIO backend: pull the object's bytes over HTTP, then parse them in memory.
+    client = minio_client(settings)
+    resp = client.get_object(settings.s3_bucket, object_name) #starts streaming
+    try:
+        data = resp.read() #reading the entire object to the memory
+    finally:
+        resp.close() 
+        resp.release_conn()
+    return pq.read_table(io.BytesIO(data))  # wrap bytes as a file-like object for pyarrow
+
+#hash the Parquet file's raw bytes when reading.
+def _read_silver_parquet_with_hash (settings, object_name: str) -> tuple[pa.Table, str]:
+    """Same as _read_silver_parquet, but also returns the SHA-256 of the raw file bytes."""
+    #trying to check the source and accodingly assign the data
+    if settings.lake_backend=="local":
+        data = (settings.local_lake_root / object_name).read_bytes() #reads the bytes directly from the local files
+    else:
+        client = minio_client(settings) #sets up a new client based on the settings 
+        resp = client.get_object(settings.s3_bucket, object_name) #initialises a bucket 
+        try:
+            data = resp.read() #reads the data from the bucket
+        finally: #for closing and releasing the connection
+            resp.close()
+            resp.release_conn()
+    return pq.read_table(io.BytesIO(data)), hashlib.sha256(data).hexdigest() #this returns the SHA 256 hashed version of the parquet file's raw bytes when reading
+    
+def load_google_gold(conn, settings) -> tuple[int, int, int, str, str]: #this function loads the silver data to gold
     # Args:
-    # conn: takes the PostgreSQL connection, settings = env config  returns a tuple of 3 integers (experiment count, shot count, decoder prediction count)
-
+    # conn: takes the PostgreSQL connection, settings = env config  returns (experiment count, shot count, decoder prediction count, experiment file hash, shot file hash)
+    
     """Load Silver's google_qec Parquet tables into Postgres, all-or-nothing.
 
     Truncates both tables first, then inserts fresh - so a rerun never
     duplicates rows, and if anything fails partway, the transaction rolls
     back and the previous complete data stays in place.
     """
-    experiment_table = _read_silver_parquet(settings, "silver/google_qec/experiment.parquet")  # calling the parquet tables for experiments
-    shot_table = _read_silver_parquet(settings, "silver/google_qec/shot.parquet")  # calling the parquet tables for the shots
+    experiment_table, experiment_hash = _read_silver_parquet_with_hash(settings, "silver/google_qec/experiment.parquet")
+    shot_table, shot_hash = _read_silver_parquet_with_hash(settings, "silver/google_qec/shot.parquet")
 
-    with conn.cursor() as cur:  # Open a database cursor to run SQL commands. TRUNCATE wipes all four Gold tables - CASCADE handles the dependency order automatically
+    with conn.cursor() as cur: # Open a database cursor to run SQL commands. TRUNCATE wipes all four Gold tables - CASCADE handles the dependency order automatically
         cur.execute(
             "TRUNCATE TABLE gold_google_decoder_prediction, gold_google_shot, "
             "gold_google_experiment, gold_google_decoder RESTART IDENTITY CASCADE;"
-        )  # using TRUNCATE as its faster than DELETE
+        ) #using TRUNCATE as its faster than DELETE
 
-        cur.executemany(  # executemany runs the same SQL statement many times with different values
+        cur.executemany( ## executemany runs the same SQL statement many times with different values
+
+            
             """
             INSERT INTO gold_google_experiment
                 (experiment_id, source_record_id, basis, distance, rounds, shots, center_row, center_col, measurement_count, detector_count)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            # contains the template for insertion of values
+            # contains the template for insertion of values 
             [
                 (r["experiment_id"], r["source_record_id"], r["basis"], r["distance"], r["rounds"], r["shots"],
                  r["center_row"], r["center_col"], r["measurement_count"], r["detector_count"])
                 for r in experiment_table.to_pylist()
-            ],  # Build a list of tuples, one per experiment row.  Each tuple's values match the %s placeholders in order.
+            ], # Build a list of tuples, one per experiment row.  Each tuple's values match the %s placeholders in order.
 
-            # experiment_table.to_pylist() converts the pyarrow table into a list of Python dicts (one dict per row) that we can pull values from by column name.
+             # experiment_table.to_pylist() converts the pyarrow table into a list of Python dicts (one dict per row) that we can pull values from by column name.
         )
+
+                # build an experiment_id -> (measurement_count, detector_count) lookup so each
+        # shot row can carry its own experiment's counts, needed for the composite FK check
+        experiment_counts = {
+            r["experiment_id"]: (r["measurement_count"], r["detector_count"])
+            for r in experiment_table.to_pylist()
+        }
 
         cur.executemany(
             """
             INSERT INTO gold_google_shot
-                (experiment_id, source_record_id, shot_index, measurement_bits, sweep_bits, detector_bits,
-                 detector_event_count, actual_observable_flip)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (experiment_id, source_record_id, shot_index, measurement_count, detector_count,
+                 measurement_bits, sweep_bits, detector_bits, detector_event_count, actual_observable_flip)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             [
-                (r["experiment_id"], r["source_record_id"], r["shot_index"], r["measurement_bits"], r["sweep_bits"], r["detector_bits"],
-                 r["detector_event_count"], r["actual_observable_flip"])
+                (
+                    r["experiment_id"], r["source_record_id"], r["shot_index"],
+                    *experiment_counts[r["experiment_id"]],
+                    r["measurement_bits"], r["sweep_bits"], r["detector_bits"],
+                    r["detector_event_count"], r["actual_observable_flip"],
+                )
                 for r in shot_table.to_pylist()
             ],
         )
@@ -226,7 +235,7 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]:  # this function l
             [(name,) for name in DECODER_NAMES],
         )
 
-        # one row per shot per decoder: what it predicted, and whether that disagreed with the actual outcome - kept as two separate facts instead of mixing "guess" and "correctness" into one column
+        # one row per shot per decoder: what it predicted, and whether that disagreed with the actual outcome. They are kept as two separate facts instead of mixing "guess" and "correctness" into one column
         decoder_prediction_rows = [
             (r["experiment_id"], r["shot_index"], name, r[f"{name}_prediction"],
              r[f"{name}_prediction"] != r["actual_observable_flip"])
@@ -243,77 +252,175 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]:  # this function l
             decoder_prediction_rows,
         )
 
-    return experiment_table.num_rows, shot_table.num_rows, len(decoder_prediction_rows)
-
-
-def run_google_gold(settings: Settings, run_id: str) -> StageResult:
-    """Load Silver's google_qec tables into Gold PostgreSQL, all-or-nothing.
-
-    Opens one connection, runs the schema DDL, loads both tables, and lets a
-    clean exit from the `with` block commit everything or an exception roll
-    it all back (this is the same connection-as-context-manager behavior
-    `run_qasmbench_gold` below relies on - see its comment for the exact
-    commit/rollback semantics). Writes this source's row_counts.json/run.json
-    entry, the same evidence pattern every Silver builder already uses.
-    """
-    result = StageResult(stage="load_postgres:google_qec", run_id=run_id)
-
-    with connections.postgres_connection(settings) as connection:
-        connection.execute(GOOGLE_GOLD_SCHEMA_SQL)
-        exp_count, shot_count, decoder_prediction_count = load_google_gold(connection, settings)
-
-    result.input_count = exp_count + shot_count
-    result.output_count = exp_count + shot_count
-    result.finish()
-
-    RESULTS_PART1.mkdir(parents=True, exist_ok=True)
-
-    # expected decoder_prediction count is shot_count x number of decoders - used below to confirm nothing silently dropped
-    expected_decoder_prediction_count = shot_count * len(DECODER_NAMES)
-
-    merge_json_file(
-        RESULTS_PART1 / "run.json",
-        "load_postgres", "google_qec",
-        payload={
-            "run_id": run_id,
-            "code_revision": code_revision(),
-            "started_at": result.started_at.isoformat(),
-            "finished_at": result.finished_at.isoformat(),
-            "output_row_counts": {
-                "gold_google_experiment": exp_count,
-                "gold_google_shot": shot_count,
-                "gold_google_decoder_prediction": decoder_prediction_count,
-            },
-        },
-    )
-    merge_json_file(
-        RESULTS_PART1 / "row_counts.json",
-        "load_postgres", "google_qec",
-        payload={
-            # silver_rows and gold_loaded are the same read here since Gold never filters/rejects rows -
-            # both are reported explicitly (rather than one number) so a future mismatch would be visible, not silent
-            "experiment": {"silver_rows": exp_count, "gold_loaded": exp_count, "match": exp_count == exp_count},
-            "shot": {"silver_rows": shot_count, "gold_loaded": shot_count, "match": shot_count == shot_count},
-            "decoder_prediction": {"expected": expected_decoder_prediction_count, "gold_loaded": decoder_prediction_count, "match": decoder_prediction_count == expected_decoder_prediction_count},
-        },
-    )
-    return result
+    return experiment_table.num_rows, shot_table.num_rows, len(decoder_prediction_rows), experiment_hash, shot_hash
 
 
 # ---------------------------------------------------------------------------
-# qasmbench Gold: gold_qasmbench_circuit, gold_qasmbench_register,
-# gold_qasmbench_stabilizer_check, gold_qasmbench_conditional_correction
+# qec_syndromes Gold tables
+# ---------------------------------------------------------------------------
+
+SYNDROMES_SOURCE_NAME = "qec_syndromes"
+
+# syndrome_experiment table with one row per fault-rate file,
+# with checks that the rate is a probability (between 0 and 1) and rounds and checks both equal 4
+SYNDROME_EXPERIMENT_DDL = """
+CREATE TABLE IF NOT EXISTS syndrome_experiment (
+    experiment_id       TEXT PRIMARY KEY,
+    physical_fault_rate NUMERIC NOT NULL CHECK (physical_fault_rate > 0 AND physical_fault_rate < 1),
+    round_count         INT NOT NULL CHECK (round_count = 4),
+    check_count         INT NOT NULL CHECK (check_count = 4)
+);
+COMMENT ON TABLE syndrome_experiment IS
+    'One row represents one simulated physical-fault-rate experiment (one source CSV file).';
+"""
+
+# syndrome_pattern: one row per distinct 16-bit pattern, plus how many of its
+# 16 checks actually fired. The CHECK is a DB-level guarantee that a pattern is
+# really 16 bytes and each byte is 0 or 1 (hex "00" or "01"), on top of what
+# Silver already validated.
+SYNDROME_PATTERN_DDL = """
+CREATE TABLE IF NOT EXISTS syndrome_pattern (
+    syndrome_bits          BYTEA PRIMARY KEY CHECK (encode(syndrome_bits, 'hex') ~ '^(0[01]){16}$'),
+    triggered_check_count  INT NOT NULL CHECK (triggered_check_count BETWEEN 0 AND 16)
+);
+COMMENT ON TABLE syndrome_pattern IS
+    'One row represents one distinct 16-bit syndrome pattern, seen in any experiment.';
+"""
+
+# main table, one row per (experiment, pattern, label) combination, points at both
+# parent tables via a foreign key, stores the quantity and label, and source_record_id for tracing
+# indexes added for quicker queries. UNIQUE(source_record_id) guarantees every
+# Gold row traces back to exactly one Silver row, never shared.
+SYNDROME_OBSERVATION_DDL = """
+CREATE TABLE IF NOT EXISTS syndrome_observation (
+    observation_id       TEXT PRIMARY KEY,
+    experiment_id        TEXT NOT NULL REFERENCES syndrome_experiment (experiment_id),
+    syndrome_bits         BYTEA NOT NULL REFERENCES syndrome_pattern (syndrome_bits),
+    logical_error_label   BOOLEAN NOT NULL,
+    quantity              BIGINT NOT NULL CHECK (quantity > 0),
+    source_record_id      TEXT NOT NULL UNIQUE,
+    UNIQUE (experiment_id, syndrome_bits, logical_error_label)
+);
+COMMENT ON TABLE syndrome_observation IS
+    'One row represents one (experiment, syndrome pattern, logical-error label) combination and its quantity weight.';
+CREATE INDEX IF NOT EXISTS idx_syndrome_observation_experiment ON syndrome_observation (experiment_id);
+CREATE INDEX IF NOT EXISTS idx_syndrome_observation_syndrome_bits ON syndrome_observation (syndrome_bits);
+"""
+
+
+def _triggered_check_count(syndrome_bits: bytes) -> int:
+    # returns how many of the 16 bits are set to 1
+    return sum(syndrome_bits)
+
+
+def _syndrome_observation_id(experiment_id: str, syndrome_bits: bytes, label: bool) -> str:
+    # hashes experiments + pattern + label into one deterministic id
+    # that is easier to reference later instead of a composite key
+    key = f"{experiment_id}:{syndrome_bits.hex()}:{label}"
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
+def create_syndrome_tables(cursor) -> None:
+    # sends the three "create table" to postgress
+    cursor.execute(SYNDROME_EXPERIMENT_DDL)
+    cursor.execute(SYNDROME_PATTERN_DDL)
+    cursor.execute(SYNDROME_OBSERVATION_DDL)
+
+
+def _check_no_silent_collisions(rows: list[dict]) -> None:
+    # raise an error if two silver rows hash to the same observation_id 
+    # but have different source_record_id
+    seen: dict[str, str] = {}
+    for r in rows:
+        observation_id = _syndrome_observation_id(
+            r["experiment_id"], r["syndrome_bits"], r["logical_error_label"]
+        )
+        existing_source = seen.get(observation_id)
+        if existing_source is not None and existing_source != r["source_record_id"]:
+            raise ValueError(
+                f"Silver rows {existing_source!r} and {r['source_record_id']!r} both map to "
+                f"observation_id {observation_id!r}"
+            )
+        seen[observation_id] = r["source_record_id"]
+
+
+def load_syndrome_tables(cursor, silver_table) -> None:
+    # loads data from silver(parquet) into gold(postgres)
+    rows = silver_table.to_pylist()
+    _check_no_silent_collisions(rows)
+
+    experiments = {
+        r["experiment_id"]: (r["physical_fault_rate"], r["round_count"], r["check_count"])
+        for r in rows
+    }
+    for experiment_id, (rate, rounds, checks) in experiments.items():
+        cursor.execute(
+            """
+            INSERT INTO syndrome_experiment (experiment_id, physical_fault_rate, round_count, check_count)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (experiment_id) DO UPDATE
+            SET physical_fault_rate = EXCLUDED.physical_fault_rate
+            """,
+            (experiment_id, rate, rounds, checks),
+        )
+
+    for bits in {r["syndrome_bits"] for r in rows}:
+        cursor.execute(
+            """
+            INSERT INTO syndrome_pattern (syndrome_bits, triggered_check_count)
+            VALUES (%s, %s)
+            ON CONFLICT (syndrome_bits) DO NOTHING
+            """,
+            (bits, _triggered_check_count(bits)),
+        )
+
+    for r in rows:
+        observation_id = _syndrome_observation_id(
+            r["experiment_id"], r["syndrome_bits"], r["logical_error_label"]
+        )
+        cursor.execute(
+            """
+            INSERT INTO syndrome_observation
+                (observation_id, experiment_id, syndrome_bits, logical_error_label, quantity, source_record_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (observation_id) DO UPDATE
+            SET quantity = EXCLUDED.quantity, source_record_id = EXCLUDED.source_record_id
+            """,
+            (observation_id, r["experiment_id"], r["syndrome_bits"], r["logical_error_label"], r["quantity"], r["source_record_id"]),
+        )
+
+    # rows that used to be in Silver but no longer shouldn't linger in Gold
+    current_source_ids = [r["source_record_id"] for r in rows]
+    cursor.execute(
+        "DELETE FROM syndrome_observation WHERE NOT (source_record_id = ANY(%s))",
+        (current_source_ids,),
+    )
+    current_experiment_ids = list(experiments)
+    cursor.execute(
+        "DELETE FROM syndrome_experiment WHERE NOT (experiment_id = ANY(%s))",
+        (current_experiment_ids,),
+    )
+    current_patterns = list({r["syndrome_bits"] for r in rows})
+    cursor.execute(
+        "DELETE FROM syndrome_pattern WHERE NOT (syndrome_bits = ANY(%s))",
+        (current_patterns,),
+    )
+
+
+# ---------------------------------------------------------------------------
+# qasmbench Gold tables
 #
 # Requirements this section is built against (assignment/data-sources.md's
 # qasmbench section and assignment/brief.md's Gold section, not google_qec's
 # shape): "at minimum, extract... parity-check ancilla, data participants,
 # and syndrome bit where explicit; syndrome-controlled correction value,
 # gate, and target" and "Keep QASMBench circuits as their own entities
-# because no row-level match to the experiments is supplied." There is no
-# google_qec-style "distance <-> detector_count" data-driven check here,
-# because qasmbench has no equivalent cross-column fact to enforce - its
-# data-driven rules are the two decisions below instead.
+# because no row-level match to the experiments is supplied." qasmbench has
+# no google_qec-style cross-column fact to enforce (no distance<->detector
+# relationship); its data-driven rules are the two decisions below instead.
 # ---------------------------------------------------------------------------
+
+QASMBENCH_SOURCE_NAME = "qasmbench"
 
 # Register-decomposition decision: Silver's circuit.parquet keeps
 # register_declarations as one JSON-text column (a nested list of qreg/creg
@@ -324,16 +431,15 @@ def run_google_gold(settings: Settings, run_id: str) -> StageResult:
 # says Gold must not "merely copy each Silver table into PostgreSQL": turning
 # an opaque JSON blob into typed, constrained (register_size > 0,
 # register_kind IN ('qreg','creg')) rows is exactly that kind of value-add.
-# Only 4 registers per circuit variant (q, a, c, syn for the parity-check
-# benchmark) - decomposing costs one small table, not real complexity.
 
 # data_qubits-as-array decision: stabilizer_check.parquet's data_qubits is a
 # small (2 elements), fixed-shape, ordered attribute of one check row, not an
 # independent many-to-many relationship worth its own junction table - across
 # the whole qasmbench archive it is ~8 total (qubit, check) pairs.
 # gold_qasmbench_stabilizer_check.data_qubits stays a native TEXT[] column
-# with a CHECK that it is never empty. Postgres arrays are queryable
-# (= ANY(data_qubits), &&) without a fifth table for data this small.
+# with a CHECK that it is never empty (cardinality(), not array_length(...,1):
+# array_length of an empty array is NULL, and a NULL CHECK expression passes,
+# so an array_length-based check would silently let an empty array through).
 
 QASMBENCH_GOLD_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS gold_qasmbench_circuit ( -- one row per parsed QASMBench circuit variant
@@ -370,7 +476,7 @@ CREATE TABLE IF NOT EXISTS gold_qasmbench_stabilizer_check ( -- one row per dete
     circuit_id         TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE,
     check_id            TEXT NOT NULL, -- "<ancilla_qubit>#<occurrence>", unique within its circuit
     ancilla_qubit       TEXT NOT NULL, -- the qubit collecting the parity and being measured into syndrome_bit
-    data_qubits         TEXT[] NOT NULL CHECK (cardinality(data_qubits) >= 1), -- the data qubits whose parity this check measures; see the array-vs-junction-table decision above (cardinality(), not array_length(): array_length() of an empty array is NULL, not 0, and a NULL CHECK expression passes - cardinality() correctly returns 0)
+    data_qubits         TEXT[] NOT NULL CHECK (cardinality(data_qubits) >= 1), -- the data qubits whose parity this check measures
     syndrome_bit         TEXT NOT NULL, -- the classical bit the ancilla is measured into
 
     UNIQUE (circuit_id, check_id)
@@ -388,7 +494,6 @@ CREATE TABLE IF NOT EXISTS gold_qasmbench_conditional_correction ( -- one row pe
     condition_value        BIGINT NOT NULL CHECK (condition_value >= 0), -- the syndrome value that triggers this correction
     gate                    TEXT NOT NULL, -- the single-qubit gate applied when the condition holds
     target_qubit             TEXT NOT NULL -- which qubit the gate is applied to
-
 );
 
 COMMENT ON TABLE gold_qasmbench_conditional_correction IS
@@ -411,9 +516,11 @@ def _register_rows(circuit_rows: list[dict]) -> list[tuple[str, str, str, int]]:
     return rows
 
 
-def load_qasmbench_gold(conn, settings) -> tuple[int, int, int, int]:
+def load_qasmbench_gold(conn, settings) -> tuple[int, int, int, int, str, str, str]:
     # Args:
-    # conn: takes the PostgreSQL connection, settings = env config  returns a tuple of 4 integers (circuit count, register count, stabilizer-check count, correction count)
+    # conn: takes the PostgreSQL connection, settings = env config  returns
+    # (circuit count, register count, stabilizer-check count, correction
+    # count, circuit file hash, stabilizer_check file hash, conditional_correction file hash)
 
     """Load Silver's qasmbench Parquet tables into Postgres, all-or-nothing.
 
@@ -422,12 +529,17 @@ def load_qasmbench_gold(conn, settings) -> tuple[int, int, int, int]:
     gold_qasmbench_conditional_correction, since they all reference it), then
     inserts fresh - so a rerun never duplicates rows, and if anything fails
     partway, the transaction rolls back and the previous complete data stays
-    in place. Mirrors load_google_gold's shape exactly: a connection-scoped
-    function the caller commits or rolls back around.
+    in place. Mirrors load_google_gold's shape: reads its own Silver files
+    (with hashes), truncates, inserts, and returns counts + hashes for the
+    caller to reconcile and record.
     """
-    circuit_table = _read_silver_parquet(settings, "silver/qasmbench/circuit.parquet")
-    stabilizer_table = _read_silver_parquet(settings, "silver/qasmbench/stabilizer_check.parquet")
-    correction_table = _read_silver_parquet(settings, "silver/qasmbench/conditional_correction.parquet")
+    circuit_table, circuit_hash = _read_silver_parquet_with_hash(settings, "silver/qasmbench/circuit.parquet")
+    stabilizer_table, stabilizer_hash = _read_silver_parquet_with_hash(
+        settings, "silver/qasmbench/stabilizer_check.parquet"
+    )
+    correction_table, correction_hash = _read_silver_parquet_with_hash(
+        settings, "silver/qasmbench/conditional_correction.parquet"
+    )
 
     circuit_rows = circuit_table.to_pylist()
     stabilizer_rows = stabilizer_table.to_pylist()
@@ -486,87 +598,321 @@ def load_qasmbench_gold(conn, settings) -> tuple[int, int, int, int]:
             ],
         )
 
-    return len(circuit_rows), len(register_rows), len(stabilizer_rows), len(correction_rows)
+    return (
+        len(circuit_rows), len(register_rows), len(stabilizer_rows), len(correction_rows),
+        circuit_hash, stabilizer_hash, correction_hash,
+    )
 
 
-def run_qasmbench_gold(settings: Settings, run_id: str) -> StageResult:
-    """Load Silver's qasmbench tables into Gold PostgreSQL, all-or-nothing.
+def _load_qasmbench(conn, settings) -> dict:
+    """Load qasmbench into Gold and check that every Silver row arrived exactly once.
 
-    `with connections.postgres_connection(settings) as connection:` commits
-    on a clean exit from the block and rolls back on any exception (psycopg's
-    connection-as-context-manager behavior) - so the schema DDL, the truncate,
-    and every insert below either all take effect together or none do, and a
-    failed run leaves the previous complete Gold snapshot untouched. Writes
-    this source's row_counts.json/run.json entry, the same evidence pattern
-    every Silver builder already uses.
+    Same shape as _load_google: run the schema DDL, load, then re-query the
+    actual Gold tables and raise if they disagree with what the loader
+    returned - so a silent drop rolls back the whole run() transaction
+    instead of being recorded as a false "match".
     """
-    result = StageResult(stage="load_postgres:qasmbench", run_id=run_id)
+    with conn.cursor() as cur:
+        cur.execute(QASMBENCH_GOLD_SCHEMA_SQL)
 
-    with connections.postgres_connection(settings) as connection:
-        connection.execute(QASMBENCH_GOLD_SCHEMA_SQL)
-        circuit_count, register_count, check_count, correction_count = load_qasmbench_gold(
-            connection, settings
+    (circuit_count, register_count, check_count, correction_count,
+     circuit_hash, stabilizer_hash, correction_hash) = load_qasmbench_gold(conn, settings)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_circuit;")
+        gold_circuit_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_register;")
+        gold_register_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_stabilizer_check;")
+        gold_check_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gold_qasmbench_conditional_correction;")
+        gold_correction_count = cur.fetchone()[0]
+        if (gold_circuit_count, gold_register_count, gold_check_count, gold_correction_count) != (
+            circuit_count, register_count, check_count, correction_count
+        ):
+            raise RuntimeError(
+                f"Gold row counts do not match Silver: "
+                f"circuit {gold_circuit_count} vs {circuit_count}, "
+                f"register {gold_register_count} vs {register_count}, "
+                f"stabilizer_check {gold_check_count} vs {check_count}, "
+                f"conditional_correction {gold_correction_count} vs {correction_count}"
+            )
+
+    return {
+        "circuit_count": circuit_count,
+        "register_count": register_count,
+        "check_count": check_count,
+        "correction_count": correction_count,
+        "circuit_hash": circuit_hash,
+        "stabilizer_hash": stabilizer_hash,
+        "correction_hash": correction_hash,
+        "gold_circuit_count": gold_circuit_count,
+        "gold_register_count": gold_register_count,
+        "gold_check_count": gold_check_count,
+        "gold_correction_count": gold_correction_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# run(): loads every source into Gold as one all-or-nothing update
+# ---------------------------------------------------------------------------
+
+# Every source's Gold tables live in one dedicated schema (team agreement), not in
+# the default "public" schema. Tests point this at a throwaway schema instead.
+GOLD_SCHEMA = "gold"
+
+
+def _load_google(conn, settings) -> dict:
+    """Load google_qec into Gold and check that every Silver row arrived exactly once.
+
+    Returns the counts and hashes that run() writes to the results files.
+    """
+    with conn.cursor() as cur:
+        cur.execute(GOOGLE_GOLD_SCHEMA_SQL)
+
+    exp_count, shot_count, decoder_prediction_count, experiment_hash, shot_hash = load_google_gold(conn, settings)
+
+    #checking the total counts -> if there is an error -> will trigger mismatch rollback
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT (*) FROM gold_google_experiment;")
+        gold_exp_count = cur.fetchone()[0] # cur.fetchone()[0] retrieves the first result row as a tuple (e.g., (150,)) and extracts the single value inside it (150).
+        cur.execute ("SELECT COUNT (*) FROM gold_google_shot;") #for shot count 
+        gold_shot_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gold_google_decoder_prediction;") #for decoder count 
+        gold_decoder_prediction_count = cur.fetchone()[0]
+        #checking and comparing if there is any mismatch in the total count 
+        if (gold_exp_count, gold_shot_count, gold_decoder_prediction_count) != (exp_count, shot_count, decoder_prediction_count):
+            raise RuntimeError(
+                f"Gold row counts do not match Silver: "
+                f"experiment {gold_exp_count} vs {exp_count}, "
+                f"shot {gold_shot_count} vs {shot_count}, "
+                f"decoder_prediction {gold_decoder_prediction_count} vs {decoder_prediction_count}"
+            )
+
+    return {
+        "exp_count": exp_count,
+        "shot_count": shot_count,
+        "decoder_prediction_count": decoder_prediction_count,
+        "experiment_hash": experiment_hash,
+        "shot_hash": shot_hash,
+        "gold_exp_count": gold_exp_count,
+        "gold_shot_count": gold_shot_count,
+        "gold_decoder_prediction_count": gold_decoder_prediction_count,
+    }
+
+
+def _load_syndromes(conn, settings) -> dict:
+    """Load qec_syndromes into Gold and check that every Silver row and its
+    quantity weight arrived exactly once.
+
+    Returns the counts and hash that run() writes to the results files.
+    """
+    syndromes_table, input_hash = _read_silver_parquet_with_hash(settings, SILVER_SYNDROMES_PATH)
+
+    silver_rows = syndromes_table.to_pylist()
+    silver_quantity_by_experiment: dict[str, int] = {}
+    for r in silver_rows:
+        silver_quantity_by_experiment[r["experiment_id"]] = (
+            silver_quantity_by_experiment.get(r["experiment_id"], 0) + r["quantity"]
         )
 
-    result.input_count = circuit_count + check_count + correction_count
-    result.output_count = circuit_count + register_count + check_count + correction_count
+    with conn.cursor() as cursor:
+        create_syndrome_tables(cursor)
+        load_syndrome_tables(cursor, syndromes_table)
+
+        cursor.execute("SELECT COUNT(*) FROM syndrome_experiment")
+        experiment_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM syndrome_pattern")
+        pattern_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM syndrome_observation")
+        observation_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COALESCE(SUM(quantity), 0) FROM syndrome_observation")
+        # SUM(quantity) over a BIGINT column comes back as NUMERIC (Decimal
+        # in Python), not int -- json.dumps can't serialize Decimal.
+        gold_quantity_total = int(cursor.fetchone()[0])
+        cursor.execute(
+            "SELECT experiment_id, COALESCE(SUM(quantity), 0) FROM syndrome_observation GROUP BY experiment_id"
+        )
+        gold_quantity_by_experiment = {
+            experiment_id: int(total) for experiment_id, total in cursor.fetchall()
+        }
+
+        # every Silver row (and its quantity weight) must arrive in Gold exactly
+        # once. Raising here, before the commit, rolls the whole load back, so
+        # a load that lost or duplicated rows never replaces the previous Gold data
+        rows_match = observation_count == syndromes_table.num_rows
+        quantity_match = gold_quantity_by_experiment == silver_quantity_by_experiment
+        if not (rows_match and quantity_match):
+            raise ValueError(
+                f"Silver-to-Gold mismatch: {syndromes_table.num_rows} Silver rows vs "
+                f"{observation_count} Gold rows; quantity per experiment "
+                f"Silver={silver_quantity_by_experiment} Gold={gold_quantity_by_experiment}"
+            )
+
+    return {
+        "input_hash": input_hash,
+        "silver_rows": syndromes_table.num_rows,
+        "experiment_count": experiment_count,
+        "pattern_count": pattern_count,
+        "observation_count": observation_count,
+        "rows_match": rows_match,
+        "silver_quantity_by_experiment": silver_quantity_by_experiment,
+        "gold_quantity_total": gold_quantity_total,
+        "gold_quantity_by_experiment": gold_quantity_by_experiment,
+        "quantity_match": quantity_match,
+    }
+
+
+def run(run_id: str) -> StageResult:
+    """Load every source's Silver tables into Gold PostgreSQL as one all-or-nothing update.
+
+    google_qec, qec_syndromes, and qasmbench are all loaded in the same
+    transaction: if any source fails (a constraint, or a Silver/Gold count
+    mismatch), nothing is committed and the previous complete Gold data
+    stays in place.
+    """
+    settings = Settings.from_environment()
+    result = StageResult(stage="load_postgres", run_id=run_id)
+
+    conn = connections.postgres_connection(settings)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {GOLD_SCHEMA}")
+            cur.execute(f"SET search_path TO {GOLD_SCHEMA}")
+
+        google = _load_google(conn, settings)
+        syndromes = _load_syndromes(conn, settings)
+        qasmbench = _load_qasmbench(conn, settings)
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    #input from silver stage (google experiment + shot, syndrome observations, qasmbench circuits/checks/corrections)
+    result.input_count = (
+        google["exp_count"] + google["shot_count"] + syndromes["silver_rows"]
+        + qasmbench["circuit_count"] + qasmbench["check_count"] + qasmbench["correction_count"]
+    )
+    #output from gold stage (google experiment + shot, syndrome observations, qasmbench circuits/registers/checks/corrections)
+    result.output_count = (
+        google["gold_exp_count"] + google["gold_shot_count"] + syndromes["observation_count"]
+        + qasmbench["gold_circuit_count"] + qasmbench["gold_register_count"]
+        + qasmbench["gold_check_count"] + qasmbench["gold_correction_count"]
+    )
+    result.issue_count = 0
     result.finish()
 
     RESULTS_PART1.mkdir(parents=True, exist_ok=True)
 
+    # --- google_qec evidence ---
+    expected_decoder_prediction_count = google["shot_count"] * len(DECODER_NAMES)
+
     merge_json_file(
         RESULTS_PART1 / "run.json",
-        "load_postgres", "qasmbench",
+        "load_postgres", "google_qec",
         payload={
             "run_id": run_id,
             "code_revision": code_revision(),
             "started_at": result.started_at.isoformat(),
             "finished_at": result.finished_at.isoformat(),
+            "input_hashes": {
+                "silver/google_qec/experiment.parquet": google["experiment_hash"],
+                "silver/google_qec/shot.parquet": google["shot_hash"],
+            },
             "output_row_counts": {
-                "gold_qasmbench_circuit": circuit_count,
-                "gold_qasmbench_register": register_count,
-                "gold_qasmbench_stabilizer_check": check_count,
-                "gold_qasmbench_conditional_correction": correction_count,
+                "gold_google_experiment": google["exp_count"],
+                "gold_google_shot": google["shot_count"],
+                "gold_google_decoder_prediction": google["decoder_prediction_count"],
             },
         },
     )
     merge_json_file(
         RESULTS_PART1 / "row_counts.json",
-        "load_postgres", "qasmbench",
+        "load_postgres", "google_qec",
         payload={
-            # silver_rows and gold_loaded are the same read here since Gold never filters/rejects rows -
-            # both are reported explicitly (rather than one number) so a future mismatch would be visible, not silent
-            "circuit": {"silver_rows": circuit_count, "gold_loaded": circuit_count, "match": True},
-            "register": {"gold_loaded": register_count},
-            "stabilizer_check": {"silver_rows": check_count, "gold_loaded": check_count, "match": True},
-            "conditional_correction": {"silver_rows": correction_count, "gold_loaded": correction_count, "match": True},
+            "experiment": {"silver_rows": google["exp_count"], "gold_loaded": google["gold_exp_count"], "match": google["gold_exp_count"] == google["exp_count"]},
+            "shot": {"silver_rows": google["shot_count"], "gold_loaded": google["gold_shot_count"], "match": google["gold_shot_count"] == google["shot_count"]},
+            "decoder_prediction": {"expected": expected_decoder_prediction_count, "gold_loaded": google["gold_decoder_prediction_count"], "match": google["gold_decoder_prediction_count"] == expected_decoder_prediction_count},
         },
     )
-    return result
 
+    # --- qec_syndromes evidence ---
+    silver_quantity_by_experiment = syndromes["silver_quantity_by_experiment"]
+    gold_quantity_by_experiment = syndromes["gold_quantity_by_experiment"]
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "load_postgres",
+        SYNDROMES_SOURCE_NAME,
+        payload={
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": result.started_at.isoformat(),
+            "finished_at": result.finished_at.isoformat(),
+            "input_hash": syndromes["input_hash"],
+            "output_row_counts": {
+                "syndrome_experiment": syndromes["experiment_count"],
+                "syndrome_pattern": syndromes["pattern_count"],
+                "syndrome_observation": syndromes["observation_count"],
+            },
+        },
+    )
+    merge_json_file(
+        RESULTS_PART1 / "row_counts.json",
+        "load_postgres",
+        SYNDROMES_SOURCE_NAME,
+        payload={
+            "silver_rows": syndromes["silver_rows"],
+            "gold_observation_rows": syndromes["observation_count"],
+            "rows_match": syndromes["rows_match"],
+            "silver_quantity_total": sum(silver_quantity_by_experiment.values()),
+            "gold_quantity_total": syndromes["gold_quantity_total"],
+            "quantity_match": syndromes["quantity_match"],
+            "quantity_by_experiment": {
+                experiment_id: {
+                    "silver": silver_quantity_by_experiment.get(experiment_id, 0),
+                    "gold": gold_quantity_by_experiment.get(experiment_id, 0),
+                    "match": silver_quantity_by_experiment.get(experiment_id, 0)
+                    == gold_quantity_by_experiment.get(experiment_id, 0),
+                }
+                for experiment_id in silver_quantity_by_experiment
+            },
+        },
+    )
 
-def run(run_id: str) -> StageResult:
-    """Load every source's Silver tables into Gold PostgreSQL.
+    # --- qasmbench evidence ---
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "load_postgres", QASMBENCH_SOURCE_NAME,
+        payload={
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": result.started_at.isoformat(),
+            "finished_at": result.finished_at.isoformat(),
+            "input_hashes": {
+                "silver/qasmbench/circuit.parquet": qasmbench["circuit_hash"],
+                "silver/qasmbench/stabilizer_check.parquet": qasmbench["stabilizer_hash"],
+                "silver/qasmbench/conditional_correction.parquet": qasmbench["correction_hash"],
+            },
+            "output_row_counts": {
+                "gold_qasmbench_circuit": qasmbench["circuit_count"],
+                "gold_qasmbench_register": qasmbench["register_count"],
+                "gold_qasmbench_stabilizer_check": qasmbench["check_count"],
+                "gold_qasmbench_conditional_correction": qasmbench["correction_count"],
+            },
+        },
+    )
+    merge_json_file(
+        RESULTS_PART1 / "row_counts.json",
+        "load_postgres", QASMBENCH_SOURCE_NAME,
+        payload={
+            "circuit": {"silver_rows": qasmbench["circuit_count"], "gold_loaded": qasmbench["gold_circuit_count"], "match": qasmbench["gold_circuit_count"] == qasmbench["circuit_count"]},
+            "register": {"silver_rows": qasmbench["register_count"], "gold_loaded": qasmbench["gold_register_count"], "match": qasmbench["gold_register_count"] == qasmbench["register_count"]},
+            "stabilizer_check": {"silver_rows": qasmbench["check_count"], "gold_loaded": qasmbench["gold_check_count"], "match": qasmbench["gold_check_count"] == qasmbench["check_count"]},
+            "conditional_correction": {"silver_rows": qasmbench["correction_count"], "gold_loaded": qasmbench["gold_correction_count"], "match": qasmbench["gold_correction_count"] == qasmbench["correction_count"]},
+        },
+    )
 
-    Each source is its own all-or-nothing transaction - see run_google_gold
-    and run_qasmbench_gold. A failure loading one source does not touch the
-    other source's already-committed Gold tables; this mirrors how
-    prepare_data.py's Silver run() keeps each source independent while
-    summing their counts into one overall StageResult. qec_syndromes Gold
-    loading is separate, not yet implemented here.
-    """
-    settings = Settings.from_environment()
-    result = StageResult(stage="load_postgres", run_id=run_id)
-
-    google_result = run_google_gold(settings, run_id)
-    result.input_count += google_result.input_count
-    result.output_count += google_result.output_count
-    result.issue_count += google_result.issue_count
-
-    qasmbench_result = run_qasmbench_gold(settings, run_id)
-    result.input_count += qasmbench_result.input_count
-    result.output_count += qasmbench_result.output_count
-    result.issue_count += qasmbench_result.issue_count
-
-    result.finish()
     return result

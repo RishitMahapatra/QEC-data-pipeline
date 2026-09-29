@@ -5,10 +5,14 @@ source: what each table represents, why the schema is shaped the way it is,
 how loading is made safe to rerun, and what is explicitly out of scope. It
 follows the same structure as
 [`gold_stage_google_qec.md`](gold_stage_google_qec.md), and the code lives in
-the same `load_postgres.py` module, in the same shape (`load_<source>_gold`
-+ `run_<source>_gold`) — this document only covers what is different about
+the same `load_postgres.py` module, in the same two-tier shape
+(`load_<source>_gold(conn, settings)` for the connection-scoped loader,
+`_load_<source>(conn, settings)` for the wrapper that runs the DDL and
+reconciles counts) — this document only covers what is different about
 qasmbench's requirements and design, not a re-explanation of the shared
-pattern.
+pattern. `run()` loads `google_qec`, `qec_syndromes`, and `qasmbench` inside
+one shared transaction, so this document also notes where qasmbench's design
+had to change to fit that shared transaction, not just its own.
 
 ---
 
@@ -27,8 +31,8 @@ conditional corrections?" analysis question (`assignment/brief.md`, Part I
 analysis question 3) is built on top of.
 
 Code: [`load_postgres.py`](../../starter/src/quantum_lake_student/stages/load_postgres.py) ·
-Tests: [`test_gold_qasmbench.py`](../../starter/tests/test_gold_qasmbench.py),
-[`test_load_postgres_run.py`](../../starter/tests/test_load_postgres_run.py)
+Tests: [`test_load_postgres_qasmbench.py`](../../starter/tests/test_load_postgres_qasmbench.py),
+[`test_load_postgres.py`](../../starter/tests/test_load_postgres.py) (combined `run()` tests)
 
 ---
 
@@ -114,18 +118,20 @@ ancillas, syndrome bits, and corrections" analysis query needs.
 
 ---
 
-## 4. Why table names and file location match google_qec
+## 4. Why table names and schema location match google_qec and qec_syndromes
 
-Both sources' Gold tables now live in the same `load_postgres.py`, merged
-from two independent lines of work (qasmbench's own implementation, and
-google_qec's from the team's `rishit_mahapatra` branch). Rather than leave
-the two sources visibly inconsistent — one schema-qualified
-(`qec.qasmbench_*`), one not (`gold_google_*`) — qasmbench's tables were
-renamed to `gold_qasmbench_*` and moved out of a dedicated `qec` schema to
-match google_qec's existing, already-tested convention. See
-`docs/decision-log.md`'s "qasmbench Gold design" section for the full
-reasoning; which schema the whole Gold model should eventually live in is
-still an open, team-level decision (`gold_stage_google_qec.md` Section 10).
+All three sources' Gold tables now live in the same `load_postgres.py`,
+merged from three independent lines of work (qasmbench's own implementation,
+google_qec's from the team's `rishit_mahapatra` branch, and qec_syndromes'
+from `dari`). A teammate reviewing the merge pointed out that qasmbench's
+tables lived in their own `qec` schema while google_qec's lived in the
+default schema — the team needed to agree on one approach rather than each
+source doing its own thing. google_qec's and qec_syndromes' code had already
+independently converged on a dedicated `gold` schema, so qasmbench's tables
+were renamed to `gold_qasmbench_*` and moved into that same `gold` schema:
+`run()` runs `CREATE SCHEMA IF NOT EXISTS gold` and `SET search_path TO gold`
+once, before loading any source. See `docs/decision-log.md`'s "qasmbench
+Gold design" section for the full reasoning.
 
 ---
 
@@ -169,99 +175,122 @@ own. See `docs/decision-log.md` for the full trade-off.
 
 ---
 
-## 6. Load behavior: all-or-nothing and rerun-safety
+## 6. Load behavior: all-or-nothing across every source, and rerun-safety
 
-Every load runs inside a single transaction (`run_qasmbench_gold`'s
-`with connections.postgres_connection(settings) as connection:` block,
-which commits on a clean exit and rolls back on any exception):
+qasmbench loads inside the one transaction `run()` opens for every source,
+not a transaction of its own:
 
-1. Ensure the schema exists (`CREATE TABLE IF NOT EXISTS` — safe to repeat)
-2. `TRUNCATE TABLE gold_qasmbench_circuit RESTART IDENTITY CASCADE` — clears
+1. `run()` opens a single connection, creates the `gold` schema and points
+   `search_path` at it (Section 4), then calls `_load_google`,
+   `_load_syndromes`, and `_load_qasmbench` on that same connection, in that
+   order.
+2. `_load_qasmbench` runs `QASMBENCH_GOLD_SCHEMA_SQL` (`CREATE TABLE IF NOT
+   EXISTS` — safe to repeat), calls `load_qasmbench_gold`, then re-queries
+   the four Gold tables with `SELECT COUNT(*)` and raises `RuntimeError` if
+   they disagree with what the loader returned (Section 7).
+3. `load_qasmbench_gold` itself does
+   `TRUNCATE TABLE gold_qasmbench_circuit RESTART IDENTITY CASCADE` — clears
    all four tables in one statement, since the other three all reference
-   `gold_qasmbench_circuit`
-3. Bulk-insert circuit rows, then register rows, then stabilizer-check rows,
-   then conditional-correction rows
-4. Commit only if every step above succeeded
+   `gold_qasmbench_circuit` — then bulk-inserts circuit rows, register rows,
+   stabilizer-check rows, and conditional-correction rows.
+4. `run()` calls `conn.commit()` only after *all three sources* have
+   succeeded; any exception anywhere — a constraint violation in any
+   source, or a mismatch raised by any of the three `_load_*` wrappers —
+   is caught, the connection is rolled back, and the exception is
+   re-raised.
 
-If any step raises an exception, the caller rolls back the entire
-transaction — including the earlier `TRUNCATE` — so a failed load leaves the
-previous complete Gold data untouched, never a half-loaded state. This is
-the exact same strategy google_qec uses (Section 6 of its own report).
+This is a stronger guarantee than qasmbench having its own all-or-nothing
+load: a qasmbench failure now rolls back an already-loaded google_qec and
+qec_syndromes too, and vice versa, so a partial Gold update across sources
+is impossible — proven directly by
+`test_run_rolls_back_google_and_syndromes_when_qasmbench_load_fails`
+(Section 8).
 
 Because every load truncates before inserting, running the load twice in a
 row produces identical row counts, not duplicates.
 
 ---
 
-## 7. Row-count reconciliation
+## 7. Row-count reconciliation: `match` is a real, independent check
 
-`row_counts.json` records what Silver had and what Gold actually loaded side
-by side, with a `match` flag where the two are expected to be equal — the
-`register` entry has no `silver_rows`/`match` pair, since registers are
-derived (decomposed from `circuit.parquet`) rather than a 1:1 copy of a
-Silver row count:
+An earlier version of this code populated `row_counts.json`'s
+`"silver_rows"` and `"gold_loaded"` from the *same* Python variable (e.g.
+`circuit_count` for both), so `"match"` was `True` by construction — it
+never actually checked the database. A teammate caught this in review
+(comparing it against their own `qec_syndromes` code, which re-queries the
+table after loading).
+
+`_load_qasmbench` now does what google_qec's `_load_google` already did:
+after `load_qasmbench_gold` returns its counts (from the Silver rows it
+read and inserted), `_load_qasmbench` runs `SELECT COUNT(*)` against each of
+the four real Gold tables — an independent, actually-executed query, not a
+reused variable — and compares that to the loader's returned counts. If any
+of the four disagree, it raises `RuntimeError` before `run()`'s
+`conn.commit()`, so a real mismatch rolls back the whole Gold update
+(Section 6), not just this source, and is never written to
+`row_counts.json` as a false `"match": true`.
+
+`row_counts.json` records both numbers side by side, with the `match` flag
+now genuinely computed from two independent sources:
 
 ```json
 {
   "circuit": { "silver_rows": 6, "gold_loaded": 6, "match": true },
-  "register": { "gold_loaded": 16 },
+  "register": { "silver_rows": 16, "gold_loaded": 16, "match": true },
   "stabilizer_check": { "silver_rows": 4, "gold_loaded": 4, "match": true },
   "conditional_correction": { "silver_rows": 6, "gold_loaded": 6, "match": true }
 }
 ```
 
 (These are the real counts from the supplied course archive, verified by an
-end-to-end run of `prepare_qasmbench_silver` + `run_qasmbench_gold`: 6
-circuits × ~2.67 registers on average — `qec_sm_n5` declares 4 registers per
-variant (`q`, `a`, `c`, `syn`), the other two benchmarks declare 2 each
-(`q`, `c`) — giving 4+4+2+2+2+2 = 16 total.)
+end-to-end run of `prepare_qasmbench_silver` + `_load_qasmbench` against a
+real Postgres: 6 circuits × ~2.67 registers on average — `qec_sm_n5`
+declares 4 registers per variant (`q`, `a`, `c`, `syn`), the other two
+benchmarks declare 2 each (`q`, `c`) — giving 4+4+2+2+2+2 = 16 total. Unlike
+the earlier draft, `register` now also gets a `silver_rows`/`match` pair:
+since `_load_qasmbench` independently counts what Python computed
+(`register_count`, from decomposing `register_declarations`) against what
+Postgres actually holds, there is a genuine independent number on both
+sides even though registers are derived, not a 1:1 copy of a Silver row.)
 
 ---
 
 ## 8. Test coverage
 
-The Gold stage is covered by 21 tests in `test_gold_qasmbench.py`, plus 2
-more in `test_load_postgres_run.py` for the combined `run()`, all run
-against a real, isolated throwaway Postgres schema (created and dropped per
-test — the real `gold_qasmbench_*` tables are never touched):
+qasmbench's own tests live in `test_load_postgres_qasmbench.py` (18 tests),
+matching `test_load_postgres.py`'s coverage depth for google_qec: schema
+creation, all three foreign keys, every value/uniqueness check (reject and
+accept sides), `load_qasmbench_gold`'s counts/hashes/tracing/register
+decomposition, idempotency, the `TRUNCATE ... CASCADE` clearing all three
+dependent tables even from an empty load, all-or-nothing rollback at the
+loader level, and a dedicated Silver-to-Gold mismatch-detection test
+(`test_load_qasmbench_detects_row_count_mismatch_and_raises`, proving
+`_load_qasmbench` raises when a lied-about count disagrees with a real
+`SELECT COUNT(*)`).
 
-- Schema creation (all four tables exist)
-- All three foreign-key relationships reject orphaned rows
-  (`gold_qasmbench_register`, `gold_qasmbench_stabilizer_check`,
-  `gold_qasmbench_conditional_correction`, each → `gold_qasmbench_circuit`)
-- Every value check, both the reject case and (where relevant) the valid
-  case: `qubit_count > 0`, `variant IN (...)` (reject and accept both
-  values), `register_size > 0`, `register_kind IN (...)`,
-  `cardinality(data_qubits) >= 1`, `condition_value >= 0`
-- Both uniqueness rules: `(benchmark_name, variant)` and
-  `source_record_id`, independently
-- `source_record_id` round-trips correctly from a Silver row to its Gold row
-  (traceability) on all three source tables
-- Register decomposition is correct: one row per declared register, with
-  the right `register_kind`/`register_name`/`register_size`
-- Repeatability: loading twice produces identical row counts, not
-  duplicates
-- The `TRUNCATE ... CASCADE` actually clears all three dependent tables,
-  even when the next load has zero circuits (not just relying on new rows
-  happening to overwrite old ones)
-- **All-or-nothing:** a successful load followed by a deliberately broken
-  second load correctly rolls back, leaving the original data completely
-  intact
-- The combined `run()` calls both sources' loaders exactly once each and
-  sums their `StageResult` counts correctly
+`test_load_postgres.py`'s combined-`run()` tests were extended to also
+exercise qasmbench genuinely, not just google_qec and qec_syndromes:
+`test_run_writes_gold_and_run_evidence` now asserts qasmbench's four tables
+and its `row_counts.json`/`run.json` entries too, and a new
+`test_run_rolls_back_google_and_syndromes_when_qasmbench_load_fails` proves
+the reverse direction of the all-or-nothing guarantee — a qasmbench-side
+failure (an empty `data_qubits` array) rolls back google_qec's and
+qec_syndromes' already-loaded tables in the same run, not just qasmbench's
+own.
 
 All tests pass:
-`cd starter && uv run pytest tests/test_gold_qasmbench.py tests/test_load_postgres_google.py tests/test_load_postgres_run.py`
+`cd starter && uv run pytest tests/test_load_postgres.py tests/test_load_postgres_syndromes.py tests/test_load_postgres_qasmbench.py`
 (requires a reachable PostgreSQL — `make up` from the repo root). Verified
-locally against a real `postgres:16.9-bookworm` container: 37/37 passed
-(2026-09-28).
+locally against a real `postgres:16.9-bookworm` container: 58/58 passed
+(2026-09-29).
 
-Beyond the fixture-based unit tests above, the full pipeline was also run
-end-to-end against the real supplied course archive and a real Postgres
-instance (`prepare_qasmbench_silver` → `run_qasmbench_gold`), confirming the
-real counts: 6 circuits, 16 registers, 4 stabilizer checks, 6 conditional
-corrections, 0 data issues — matching `docs/decision-log.md`'s per-benchmark
-table exactly.
+Beyond the fixture-based unit tests above, `_load_qasmbench` was also run
+directly against the real supplied course archive's Silver output and a
+real Postgres instance (`prepare_qasmbench_silver` → `_load_qasmbench`,
+inside the real `gold` schema), confirming the real counts: 6 circuits, 16
+registers, 4 stabilizer checks, 6 conditional corrections — matching
+`docs/decision-log.md`'s per-benchmark table exactly, with the
+`SELECT COUNT(*)`-based mismatch check (Section 7) passing on real data.
 
 ---
 
@@ -316,10 +345,10 @@ the SQL file for the full result table and interpretation.
 
 ## 12. Limitations
 
-- Only qasmbench's and google_qec's Gold tables exist so far; syndromes Gold
-  loading is separate, not yet implemented in `load_postgres.py`.
 - The load is a full truncate-then-reload of the whole qasmbench slice
   rather than a row-level upsert; this is a deliberate choice for this
   dataset's size (Section 6), not a general Gold-loading strategy.
-- Which Postgres schema the whole Gold model should live in (`public`, a
-  dedicated `gold` schema, or similar) is still open — see Section 4.
+- All three sources now share one transaction, which strengthens the
+  all-or-nothing guarantee but also means a transient failure in one
+  source (e.g. a slow connection) blocks the other two from committing
+  anything that run until it is fixed — there is no partial-success mode.

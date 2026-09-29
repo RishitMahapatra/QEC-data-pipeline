@@ -22,26 +22,47 @@ Yes — enforced by code, not just sampled. `register_sources.py`'s
 every time the Bronze stage runs, so it can't silently regress.
 
 ### Does every parsed sequence have the same round/check shape and binary domain? — *Stage: Silver (shape/domain check in `prepare_data.py`)*
-TODO — confirmed for row 0 of `d-3_pfr-0.000010_nb-10M.csv` only so far.
-Needs checking across all rows, all 7 files.
+Done — confirmed across all 7 files, not just row 0. `build_syndromes`
+rejects any row whose parsed `syndromes` value isn't exactly 4 tuples of 4
+binary values (`syndromes.shape`); running it against the real Bronze zip
+(`test_accepted_quantity_reconciles_to_filename_hint_on_real_bronze_zip`)
+produces 0 `syndromes.shape` issues across the whole dataset.
 
 ### Do quantities reconcile to the filename sample count? — *Stage: Silver (positive-quantity + 10M reconciliation check)*
-TODO — confirmed `sum(quantity) == 10,000,000` for `d-3_pfr-0.000010_nb-10M.csv`
-(matches `nb-10M`) only so far. Needs checking across all 7 files.
+Done — confirmed across all 7 files, not just one. Total accepted `quantity`
+across the real dataset is ~70,000,000, within 2% of the combined `nb-10M`
+filename hints (7 files × ~10M), and 0
+`syndromes.weighted_total_reconciliation` warnings are raised on the
+supplied data. See `reports/silver_stage/silver_stage_syndromes.md`.
 
 ### Can the same syndrome occur under both logical-error labels? — *Stage: Silver (must accept both rows as valid, not dedupe)*
-TODO — `d-3_pfr-0.000010_nb-10M.csv` showed 0/68 collisions (no syndrome seen
-under both labels in that file). Must re-run across all 7 files, especially
-higher fault-rate ones, before concluding either way.
+Done. Yes — confirmed against the real Gold data, not just a synthetic test
+case. `test_same_syndrome_both_labels_are_both_kept` proves the code never
+dedupes a collision; querying the real dataset
+(`SELECT syndrome_bits FROM syndrome_observation GROUP BY syndrome_bits HAVING COUNT(DISTINCT logical_error_label) > 1`)
+shows **18,676 distinct patterns** occur under both labels across the 7
+files — this is common, not a rare edge case. Both rows are correctly
+retained for each one, not deduped.
 
 ### What is the correct key if syndrome alone is not unique? — *Stage: Silver (`source_record_id` design for `syndrome_observation.parquet`)*
-TODO — candidate: `(experiment_id, syndromes, labels)`, where `experiment_id`
-derives from the file (distance + physical fault rate). Verify this composite
-is actually unique per file (no duplicate aggregate rows).
+Resolved, differently than the original candidate. Silver's
+`source_record_id` is `sha256(filename:row_index)` — a hash of the row's
+*position* in its source file, not a hash of its content
+`(experiment_id, syndromes, labels)`. This is simpler and still fully stable
+(same file + same row position -> same id on every rerun), and doesn't
+require re-hashing the full syndrome value. The content-based composite key
+idea was used instead at the Gold layer: `syndrome_observation.observation_id`
+is `sha256(experiment_id:syndrome_bits:label)`, matching this table's
+`UNIQUE (experiment_id, syndrome_bits, logical_error_label)` constraint. See
+`reports/gold_stage/gold_stage_syndromes.md`, decision 4.
 
 ### Which aggregates must use `quantity` as a weight? — *Stage: Gold/ML (Silver only carries `quantity` through unchanged)*
-TODO — e.g. logical-error rate per fault rate must be
-`sum(quantity where label) / sum(quantity)`, not a row count.
+Done for Gold's analysis query. `reports/gold_stage/query1_weighted_syndrome_by_fault_rate.sql`
+computes exactly `sum(quantity) GROUP BY (physical_fault_rate, logical_error_label)`
+— confirms the weighted, not row-count, logical-error share rises from
+~0.02% at fault rate 0.00001 to ~18.6% at 0.01. Still open: which ML-side
+(Part II) aggregations need the same weighting — that's Victor's stage, not
+yet checked against this.
 
 ### Why must a model split keep an entire physical-fault-rate group together? — *Stage: Part II (ML split design, not a cleaning question)*
 TODO
@@ -153,27 +174,45 @@ rejected); checks and corrections come only from accepted circuits.
 
 ## qasmbench Gold design
 
-*Stage: Gold (`load_postgres.py`, `load_qasmbench_gold` / `run_qasmbench_gold`).
+*Stage: Gold (`load_postgres.py`, `load_qasmbench_gold` / `_load_qasmbench`).
 Loads the three QASMBench Silver tables into four Postgres tables, scoped to
-QASMBench only — Google and syndromes Gold tables are separate. As of this
-merge, qasmbench's Gold code lives in the same `load_postgres.py` as
-google_qec's (brought over from the team's `rishit_mahapatra` branch), in the
-same file/table-naming/function shape, so the two sources read the same to
-anyone reviewing the module: `gold_<source>_<entity>` tables, a
-`load_<source>_gold(conn, settings)` connection-scoped loader, and a
-`run_<source>_gold(settings, run_id)` wrapper that owns the transaction and
-the evidence files.*
+QASMBench only for its own schema/rows — but as of the merge with
+`google_qec`'s and `qec_syndromes`' Gold code (from the team's
+`rishit_mahapatra` and `dari` branches), qasmbench loads inside the same
+single shared transaction as every other source, in `run()`. All three
+sources' code lives in one `load_postgres.py`, and qasmbench follows the
+same two-tier shape google_qec established: `load_qasmbench_gold(conn,
+settings)` is a connection-scoped loader (truncate + insert + return counts
+and hashes, no commit of its own), and `_load_qasmbench(conn, settings)`
+wraps it — runs the schema DDL, calls the loader, then re-queries the actual
+Gold tables and raises if they disagree with what the loader returned.*
 
-**Decision — table names and location match google_qec's convention.**
-Tables are `gold_qasmbench_circuit`, `gold_qasmbench_register`,
-`gold_qasmbench_stabilizer_check`, `gold_qasmbench_conditional_correction` —
-unprefixed, relying on the connection's default schema (`public`), the same
-as `gold_google_*`. An earlier draft of this design put qasmbench's tables in
-a dedicated `qec` schema; that was dropped in favor of matching google_qec's
-already-established convention once the two sources' code was merged into
-one file, rather than leaving the two sources visibly inconsistent. Which
-schema the whole Gold model should eventually live in is still open (see
-`reports/gold_stage/gold_stage_google_qec.md`'s "Open items").
+**Decision — table names and shared `gold` schema (team decision, resolved
+across all three sources together).** Tables are `gold_qasmbench_circuit`,
+`gold_qasmbench_register`, `gold_qasmbench_stabilizer_check`,
+`gold_qasmbench_conditional_correction`. `run()` does
+`CREATE SCHEMA IF NOT EXISTS gold` and `SET search_path TO gold` once, before
+loading any source, so every source's Gold tables — `gold_google_*`,
+`syndrome_*`, and `gold_qasmbench_*` alike — live in the same dedicated
+`gold` schema, not `public`. An earlier draft of this design put qasmbench's
+tables in their own `qec` schema; that was dropped once a teammate flagged
+during review that the team should pick one schema strategy together rather
+than each source doing its own thing, and `google_qec`'s and `qec_syndromes`'
+code (independently arriving at the same `gold` schema) was already the
+majority direction.
+
+**Decision — re-query the actual Gold table instead of trusting the
+loader's own count (also from that same review).** An earlier version of
+this code wrote `row_counts.json`'s `"gold_loaded"` field from the *same*
+Python variable as `"silver_rows"`, making `"match"` trivially always
+`True` — it never actually checked the database. `_load_qasmbench` now runs
+`SELECT COUNT(*)` against each of the four real tables after loading and
+compares that independent count to what `load_qasmbench_gold` returned;
+any disagreement raises `RuntimeError` *inside* the still-open transaction,
+which rolls back not just qasmbench's rows but every source loaded earlier
+in the same `run()` call (google_qec, syndromes) — proven by
+`test_load_qasmbench_detects_row_count_mismatch_and_raises` and
+`test_run_rolls_back_google_and_syndromes_when_qasmbench_load_fails`.
 
 **Decision — normalize `register_declarations` instead of copying it.**
 Silver's `circuit.parquet` keeps `register_declarations` as one JSON-text
@@ -205,22 +244,23 @@ that evaluates to `NULL` — as opposed to `FALSE` — passes, so an
 until a test caught it. `cardinality()` returns `0` for an empty array, so
 the comparison actually evaluates to `FALSE`.)
 
-**Decision — full truncate-then-reload in one transaction, not upsert.**
-Each run of `load_qasmbench_gold` does
+**Decision — full truncate-then-reload, not upsert, inside the shared
+cross-source transaction.** Each call to `load_qasmbench_gold` does
 `TRUNCATE TABLE gold_qasmbench_circuit RESTART IDENTITY CASCADE` (which
 clears `gold_qasmbench_register`, `gold_qasmbench_stabilizer_check`, and
 `gold_qasmbench_conditional_correction` too, since they all reference the
-circuit table), then re-inserts every row, all inside the one implicit
-transaction opened by `run_qasmbench_gold`'s
-`with connections.postgres_connection(settings) as connection:` (commits on
-a clean exit, rolls back on any exception). QASMBench's Gold slice is small
+circuit table), then re-inserts every row. Unlike the design's first draft,
+this no longer opens its own connection/transaction — `run()` opens one
+connection, calls `_load_google`, `_load_syndromes`, then `_load_qasmbench`
+in sequence on it, and only commits once all three succeed (`conn.commit()`
+after the third call; any exception anywhere rolls back everything and the
+connection is closed in a `finally`). QASMBench's Gold slice is small
 (6 circuits, ~4 checks, ~6 corrections) and derived deterministically from
 an unchanged Bronze archive, so a full rebuild each run is simpler to reason
 about than a natural-key upsert and still satisfies "repeated runs on
 unchanged inputs must leave stable identifiers and must not add duplicate
 business records" — a rerun always lands on the same `circuit_id`s and row
-counts, and a failed run leaves the previous complete snapshot untouched.
-This mirrors google_qec's own truncate-then-reload strategy exactly.
+counts. This mirrors google_qec's own truncate-then-reload strategy exactly.
 
 **Cross-source isolation.** None of these four tables reference
 `google_qec` or `qec_syndromes` Gold tables. That decision, and the evidence
