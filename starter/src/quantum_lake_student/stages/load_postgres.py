@@ -45,7 +45,7 @@ DECODER_NAMES = (
 GOOGLE_GOLD_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS gold_google_experiment ( --for each experiment directory
     experiment_id       TEXT PRIMARY KEY, -- one row per experiment
-    source_record_id TEXT NOT NULL, -- this is to trace form which silver row this particular gold row came from (IN RESPONSE TO HIGH PRIORITY COMMENT)
+    source_record_id TEXT NOT NULL UNIQUE, -- this is to trace form which silver row this particular gold row came from (IN RESPONSE TO HIGH PRIORITY COMMENT)
     basis                TEXT NOT NULL CHECK (basis in('X','Z')), --measurement basis and added the checks to includes only X and Z (IN RESPONSE TO COMMENT ABOUT CHECKING IF THE BASIS ONLY INCLUDES X and Z and not just NOT NULL...
     distance             INTEGER NOT NULL CHECK (distance > 0), --the distance must be positive 
     rounds                INTEGER NOT NULL CHECK (rounds > 0), -- QEC rounds must be positive
@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS gold_google_experiment ( --for each experiment direct
         (distance = 3 AND detector_count = 200) OR (distance = 5 AND detector_count = 600)
     ), -- This checks if the actual counts match the properties.yml where the fact is: For distance = 3, there will be 200 decoders and for distance = 5, there will be 600 decoders. PostgreSQL will automatically reject any files with mismatched distance and decoder count.
     
-    UNIQUE(distance, rounds, center_row, center_col) -- this ensures that no two experiments can share the same distance/rounds/location 
+      UNIQUE(basis,distance, rounds, center_row, center_col), -- this ensures that no two experiments can share the same basis/distance/rounds/location
+    UNIQUE (experiment_id, measurement_count, detector_count) -- required so gold_google_shot's composite foreign key can reference this exact triple
 );
 
 COMMENT ON TABLE gold_google_experiment IS
@@ -66,15 +67,28 @@ COMMENT ON TABLE gold_google_experiment IS
 
 CREATE TABLE IF NOT EXISTS gold_google_shot ( -- for the single shots
     experiment_id                          TEXT NOT NULL REFERENCES gold_google_experiment(experiment_id), 
-    source_record_id TEXT NOT NULL, -- this is to trace form which silver row this particular gold row came from (IN RESPONSE TO HIGH PRIORITY COMMENT)
+    measurement_count INTEGER NOT NULL,  -- copied from the experiment row so byte-length checks below can reference it without a cross-table query
+    detector_count INTEGER NOT NULL, -- same reasoning as the above -> measurement count 
+    source_record_id TEXT NOT NULL UNIQUE, -- this is to trace form which silver row this particular gold row came from (IN RESPONSE TO HIGH PRIORITY COMMENT)
     shot_index                             INTEGER NOT NULL CHECK (shot_index >= 0), -- can be zero based and non negative
-    measurement_bits                       BYTEA NOT NULL, --raw packed bits for this shot
-    sweep_bits                             BYTEA NOT NULL, -- configuration bits for this shot
-    detector_bits                          BYTEA NOT NULL CHECK (octet_length(detector_bits) IN (25, 75)), -- derived detector events; 25 bytes for d3, 75 bytes for d5
     
-    detector_event_count                   INTEGER NOT NULL CHECK (detector_event_count >= 0), --counts the set of detector bits
+    sweep_bits                             BYTEA NOT NULL, -- configuration bits for this shot
+        detector_bits                          BYTEA NOT NULL CHECK (octet_length(detector_bits) = CEIL(detector_count / 8.0)), -- must match THIS shot's own detector_count exactly, not just any valid length
+    
+    measurement_bits                       BYTEA NOT NULL CHECK (octet_length(measurement_bits) = CEIL(measurement_count / 8.0)), -- same idea for measurement bits
+    
+        detector_event_count                   INTEGER NOT NULL CHECK (detector_event_count >= 0 AND detector_event_count <= detector_count), --counts the set of detector bits; can never exceed the total number of detectors
     actual_observable_flip                 BOOLEAN NOT NULL, --ground truth outcome 
-    PRIMARY KEY (experiment_id, shot_index)  -- composite: a shot is only unique WITHIN its experiment
+    PRIMARY KEY (experiment_id, shot_index),  -- composite: a shot is only unique WITHIN its experiment
+
+    
+
+    --adding the foreign key: to enforce that these copies actually match the real experiment row
+    FOREIGN KEY(experiment_id, measurement_count, detector_count)
+        REFERENCES gold_google_experiment (experiment_id, measurement_count, detector_count)
+        -- if a shot's copied counts don't match the actual experiment row, the insert is rejected
+
+      
 );
 -- NOTE: the four decoder_prediction boolean columns that used to live here  have been moved out into gold_google_decoder_prediction below, so that "what a decoder guessed" and "whether it was wrong" are their own table instead of four repeated yes/no columns bolted onto shot(IN RESPONSE TO "DON'T JUST COPY SILVER" / DECODER-TABLE COMMENT)
 
@@ -128,6 +142,22 @@ def _read_silver_parquet(settings, object_name: str) -> pa.Table: #this is a hel
         resp.release_conn()
     return pq.read_table(io.BytesIO(data))  # wrap bytes as a file-like object for pyarrow
 
+#hash the Parquet file's raw bytes when reading.
+def _read_silver_parquet_with_hash (settings, object_name: str) -> tuple[pa.Table, str]:
+    """Same as _read_silver_parquet, but also returns the SHA-256 of the raw file bytes."""
+    #trying to check the source and accodingly assign the data
+    if settings.lake_backend=="local":
+        data = (settings.local_lake_root / object_name).read_bytes() #reads the bytes directly from the local files
+    else:
+        client = minio_client(settings) #sets up a new client based on the settings 
+        resp = client.get_object(settings.s3_bucket, object_name) #initialises a bucket 
+        try:
+            data = resp.read() #reads the data from the bucket
+        finally: #for closing and releasing the connection
+            resp.close()
+            resp.release_conn()
+    import hashlib #this is the hash library 
+    return pq.read_table(io.BytesIO(data)), hashlib.sha256(data).hexdigest() #this returns the SHA 256 hashed version of the parquet file's raw bytes when reading
     
 def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loads the silver data to gold
     # Args:
@@ -139,8 +169,8 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loa
     duplicates rows, and if anything fails partway, the transaction rolls
     back and the previous complete data stays in place.
     """
-    experiment_table = _read_silver_parquet(settings, "silver/google_qec/experiment.parquet") #calling the parquet tables for experiments
-    shot_table = _read_silver_parquet(settings, "silver/google_qec/shot.parquet") #calling the parquet tables for the shots
+    experiment_table, experiment_hash = _read_silver_parquet_with_hash(settings, "silver/google_qec/experiment.parquet")
+    shot_table, shot_hash = _read_silver_parquet_with_hash(settings, "silver/google_qec/shot.parquet")
 
     with conn.cursor() as cur: # Open a database cursor to run SQL commands.TRUNCATE order updated to also wipe the two new decoder tables - CASCADE handles the dependency order automatically (IN RESPONSE TO DECODER-TABLE COMMENT)
         cur.execute(
@@ -167,18 +197,27 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loa
              # experiment_table.to_pylist() converts the pyarrow table into a list of Python dicts (one dict per row) that we can pull values from by column name.
         )
 
+                # build an experiment_id -> (measurement_count, detector_count) lookup so each
+        # shot row can carry its own experiment's counts, needed for the composite FK check
+        experiment_counts = {
+            r["experiment_id"]: (r["measurement_count"], r["detector_count"])
+            for r in experiment_table.to_pylist()
+        }
+
         cur.executemany(
             """
             INSERT INTO gold_google_shot
-                (experiment_id, source_record_id, shot_index, measurement_bits, sweep_bits, detector_bits,
-                 detector_event_count, actual_observable_flip)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (experiment_id, source_record_id, shot_index, measurement_count, detector_count,
+                 measurement_bits, sweep_bits, detector_bits, detector_event_count, actual_observable_flip)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            # column list and placeholders trimmed to 8 - the 4 decoder prediction columns no longer live on this table (IN RESPONSE TO DECODER-TABLE COMMENT)
             [
-                
-                (r["experiment_id"], r["source_record_id"], r["shot_index"], r["measurement_bits"], r["sweep_bits"], r["detector_bits"],
-                 r["detector_event_count"], r["actual_observable_flip"])
+                (
+                    r["experiment_id"], r["source_record_id"], r["shot_index"],
+                    *experiment_counts[r["experiment_id"]],
+                    r["measurement_bits"], r["sweep_bits"], r["detector_bits"],
+                    r["detector_event_count"], r["actual_observable_flip"],
+                )
                 for r in shot_table.to_pylist()
             ],
         )
@@ -209,7 +248,7 @@ def load_google_gold(conn, settings) -> tuple[int, int, int]: #this function loa
         )
 
     # return count widened to include decoder_prediction rows (IN RESPONSE TO DECODER-TABLE COMMENT)
-    return experiment_table.num_rows, shot_table.num_rows, len(decoder_prediction_rows)
+    return experiment_table.num_rows, shot_table.num_rows, len(decoder_prediction_rows), experiment_hash, shot_hash
 
 from quantum_lake_student.models import RESULTS_PART1, StageResult, merge_json_file, code_revision
 
@@ -225,7 +264,25 @@ def run(run_id: str) -> StageResult:
             cur.execute(GOOGLE_GOLD_SCHEMA_SQL)
 
         # unpacking widened to 3 values to match load_google_gold's new return signature (IN RESPONSE TO DECODER-TABLE COMMENT)
-        exp_count, shot_count, decoder_prediction_count = load_google_gold(conn, settings)
+        exp_count, shot_count, decoder_prediction_count, experiment_hash, shot_hash = load_google_gold(conn, settings)
+
+        #checking the total counts -> if there is an error -> will trigger mismatch rollback
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT (*) FROM gold_google_experiment;")
+            gold_exp_count = cur.fetchone()[0] # cur.fetchone()[0] retrieves the first result row as a tuple (e.g., (150,)) and extracts the single value inside it (150).
+            cur.execute ("SELECT COUNT (*) FROM gold_google_shot;") #for shot count 
+            gold_shot_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM gold_google_decoder_prediction;") #for decoder count 
+            gold_decoder_prediction_count = cur.fetchone()[0]
+            #checking and comparing if there is any mismatch in the total count 
+            if (gold_exp_count, gold_shot_count, gold_decoder_prediction_count) != (exp_count, shot_count, decoder_prediction_count):
+                raise RuntimeError(
+                    f"Gold row counts do not match Silver: "
+                f"experiment {gold_exp_count} vs {exp_count}, "
+                f"shot {gold_shot_count} vs {shot_count}, "
+                f"decoder_prediction {gold_decoder_prediction_count} vs {decoder_prediction_count}"
+            )
+                
         conn.commit()
     except Exception:
         conn.rollback()
@@ -240,7 +297,6 @@ def run(run_id: str) -> StageResult:
 
     RESULTS_PART1.mkdir(parents=True, exist_ok=True)
 
-    # expected decoder_prediction count is shot_count x number of decoders - used below to confirm nothing silently dropped (IN RESPONSE TO ROW-COUNT COMPARISON COMMENT)
     expected_decoder_prediction_count = shot_count * len(DECODER_NAMES)
 
     merge_json_file(
@@ -251,10 +307,14 @@ def run(run_id: str) -> StageResult:
             "code_revision": code_revision(),
             "started_at": result.started_at.isoformat(),
             "finished_at": result.finished_at.isoformat(),
+            "input_hashes": {
+                "silver/google_qec/experiment.parquet": experiment_hash,
+                "silver/google_qec/shot.parquet": shot_hash,
+            },
             "output_row_counts": {
                 "gold_google_experiment": exp_count,
                 "gold_google_shot": shot_count,
-                "gold_google_decoder_prediction": decoder_prediction_count,  # new (DECODER-TABLE COMMENT)
+                "gold_google_decoder_prediction": decoder_prediction_count,
             },
         },
     )
@@ -262,11 +322,9 @@ def run(run_id: str) -> StageResult:
         RESULTS_PART1 / "row_counts.json",
         "load_postgres", "google_qec",
         payload={
-            # silver_rows and gold_loaded are the same read here since Gold never filters/rejects rows -
-            # both are reported explicitly (rather than one number) so a future mismatch would be visible, not silent (IN RESPONSE TO ROW-COUNT COMPARISON COMMENT)
-            "experiment": {"silver_rows": exp_count, "gold_loaded": exp_count, "match": exp_count == exp_count},
-            "shot": {"silver_rows": shot_count, "gold_loaded": shot_count, "match": shot_count == shot_count},
-            "decoder_prediction": {"expected": expected_decoder_prediction_count, "gold_loaded": decoder_prediction_count, "match": decoder_prediction_count == expected_decoder_prediction_count},
+            "experiment": {"silver_rows": exp_count, "gold_loaded": gold_exp_count, "match": gold_exp_count == exp_count},
+            "shot": {"silver_rows": shot_count, "gold_loaded": gold_shot_count, "match": gold_shot_count == shot_count},
+            "decoder_prediction": {"expected": expected_decoder_prediction_count, "gold_loaded": gold_decoder_prediction_count, "match": gold_decoder_prediction_count == expected_decoder_prediction_count},
         },
     )
 
