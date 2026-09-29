@@ -117,8 +117,9 @@ enforces this before the data ever reaches Gold, the database itself does
 not just trust that nothing upstream ever changes.
 
 **9. The load is all-or-nothing.** Schema creation, table creation and all
-three load passes run inside a single transaction
-(`with postgres_connection(...)`). If any step raises partway through --
+three load passes run inside a single transaction, shared with the
+`google_qec` load (`run()` loads both sources together and commits once). If
+any step raises partway through, in either source --
 including the new collision check and the new value/length `CHECK`s --
 nothing from that run is committed and the previous complete Gold state is
 left in place; only if every step succeeds does the transaction commit.

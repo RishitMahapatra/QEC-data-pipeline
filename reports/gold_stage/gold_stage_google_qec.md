@@ -65,6 +65,10 @@ every Gold table's grain be explicitly stated.
 ### Foreign keys
 
 - `gold_google_shot.experiment_id → gold_google_experiment.experiment_id`
+- `gold_google_shot (experiment_id, measurement_count, detector_count) →
+  gold_google_experiment (experiment_id, measurement_count, detector_count)`
+  — guarantees that the counts copied onto each shot (see check 4 below)
+  are the real counts of that shot's experiment
 - `gold_google_decoder_prediction.decoder_name → gold_google_decoder.decoder_name`
 - `gold_google_decoder_prediction (experiment_id, shot_index) → gold_google_shot (experiment_id, shot_index)`
 
@@ -76,8 +80,8 @@ every Gold table's grain be explicitly stated.
 
 ### Data-driven checks — rules that come from the data itself, not just "> 0"
 
-These four were added specifically because a generic positivity check
-would let internally-contradictory rows through:
+These were added specifically because a generic positivity check would let
+internally-contradictory rows through:
 
 1. **Detector count must match code distance.** A distance-3 experiment
    always has exactly 200 detectors; distance-5 always has exactly 600.
@@ -87,13 +91,24 @@ would let internally-contradictory rows through:
    only ever measured in one of these two bases; anything else is a data
    error, not a valid third option.
 3. **No duplicate processor-location configuration.** A `UNIQUE` constraint
-   on `(distance, rounds, center_row, center_col)` prevents two experiment
-   rows from silently claiming the same physical chip location and
-   settings — which would make them indistinguishable.
-4. **Packed detector-byte length matches distance.** `detector_bits` must
-   be exactly 25 bytes (distance-3) or 75 bytes (distance-5) — a defensive
-   check independent of Silver, catching any bug introduced between the
-   two stages rather than blindly trusting upstream validation.
+   on `(basis, distance, rounds, center_row, center_col)` prevents two
+   experiment rows from claiming the same chip location with the same
+   settings. `basis` is part of the rule because an X-basis and a Z-basis
+   run at the same location are two different, valid experiments.
+4. **Packed byte lengths match that shot's own experiment.**
+   `detector_bits` must be exactly `ceil(detector_count / 8)` bytes (25 for
+   distance 3, 75 for distance 5) and `measurement_bits` exactly
+   `ceil(measurement_count / 8)` bytes (27 and 79). PostgreSQL `CHECK`
+   constraints cannot read another table, so `measurement_count` and
+   `detector_count` are copied onto each shot row, and the composite foreign
+   key above makes the copies match the experiment. This turns a cross-table
+   rule into a row-level `CHECK`: a distance-3 shot carrying 75 detector
+   bytes is rejected.
+5. **Fired detectors cannot exceed detectors.** `detector_event_count` must
+   be between 0 and `detector_count`.
+6. **Unique trace ID.** `source_record_id` is `UNIQUE` on both the
+   experiment and shot tables, so every Gold row traces back to exactly one
+   Silver row.
 
 ### Indexes
 
@@ -121,10 +136,21 @@ as one database row per individual detector reading.
   produce `(200 × 200,000) + (600 × 50,000) = 40,000,000 + 30,000,000 =`
   **70,000,000 rows**, a **~280×** increase in row count.
 
+**Measured on the loaded data** (`pg_total_relation_size`, including
+indexes): the summed `octet_length(detector_bits)` is exactly 8,750,000
+bytes, matching the calculation. The whole `gold_google_shot` table
+(250,000 rows, including measurement and sweep bits) is 103 MB, and
+`gold_google_experiment` is 80 kB.
+
 No required SQL analysis or the ML export table needs single-detector
 granularity — both only ever consume the packed bits and a precomputed
 `detector_event_count`. The compact design was chosen because it matches
 what is actually used, and avoids an unjustified storage/complexity cost.
+
+**Cost of this choice:** SQL cannot easily filter on a single detector
+(e.g. "shots where detector 17 fired"); the bits have to be unpacked in
+Python (`numpy.unpackbits(..., bitorder="little")` — bits are little-endian
+inside each byte). No required query needs this.
 
 <p align = "center">
 <img width="696" height="623" alt="image" src="https://github.com/user-attachments/assets/e247ea98-11c8-4794-be46-eebdd5eba8e1" />
@@ -161,6 +187,12 @@ warns against.
 - "Error rate per decoder" becomes a single grouped query instead of four
   separately written, copy-pasted queries.
 
+**Cost of this choice:** `gold_google_decoder_prediction` has 1,000,000
+rows (250,000 shots × 4 decoders) and measures 174 MB — larger than the
+shot table itself, because every row repeats `experiment_id` and
+`decoder_name` as text. The ML export also has to turn the four rows per
+shot back into the four `*_prediction` columns the ML table requires.
+
 <p align = "center">
 <img width="766" height="354" alt="image" src="https://github.com/user-attachments/assets/2078fbd0-8f60-4557-87cf-8246baa0d0a7" />
 </p>
@@ -176,7 +208,9 @@ Every load runs inside a single transaction:
    order is handled automatically and no stale rows survive)
 3. Bulk-insert experiment rows, then shot rows, then decoder rows, then
    decoder-prediction rows
-4. Commit only if every step above succeeded
+4. Count the rows now in each Gold table and compare them with Silver
+   (Section 7); a mismatch raises an error
+5. Commit only if every step above succeeded
 
 If any step raises an exception, the caller rolls back the entire
 transaction — including the earlier `TRUNCATE` — so a failed load leaves
@@ -193,10 +227,12 @@ a row produces identical row counts, not duplicates.
 
 ## 7. Row-count reconciliation
 
-Rather than reporting a single "rows loaded" number, `row_counts.json`
-records what Silver had and what Gold actually loaded side by side, with
-a computed match flag — so a silent drop between the two stages would be
-visible, not hidden:
+Before committing, the load counts the rows actually in each Gold table
+(`SELECT COUNT(*)`) and compares them with the Silver row counts (and, for
+decoder predictions, with Silver shots × 4). If any count differs, it raises
+an error, the transaction rolls back, and the previous Gold data stays in
+place — so rows lost or duplicated between the two stages can never be
+committed. `row_counts.json` records both sides and the result:
 
 ```json
 {
@@ -206,18 +242,26 @@ visible, not hidden:
 }
 ```
 
+`run.json` additionally records the SHA-256 hash of both Silver input files
+(`input_hashes`), the code revision, start and end time, and the row count
+of every Gold table.
+
 ---
 
 ## 8. Test coverage
 
-The Gold stage is covered by 14 tests, run against a real, isolated
+The Gold stage is covered by 23 tests, run against a real, isolated
 throwaway Postgres schema (created and dropped per test — the real
 `gold_google_*` tables are never touched):
 
 - Schema creation (all four tables exist)
-- Both foreign key relationships reject orphaned rows
-- All four data-driven constraints, both the reject case and the valid
-  case
+- Foreign keys reject orphaned rows, and the composite foreign key rejects
+  a shot whose copied counts don't match its experiment
+- All data-driven constraints, both the reject case and the valid case
+  (distance/detector count, basis, same location with same vs. different
+  basis, detector and measurement byte lengths, fired detectors ≤
+  detectors)
+- The experiment's counts are copied correctly onto each shot
 - `source_record_id` round-trips correctly from a Silver row to its Gold
   row (traceability)
 - Decoder-prediction `was_wrong` is computed correctly against the actual
@@ -227,6 +271,9 @@ throwaway Postgres schema (created and dropped per test — the real
 - **All-or-nothing:** a successful load followed by a deliberately broken
   second load correctly rolls back, leaving the original data completely
   intact
+- The full `run()` writes the Gold tables plus `run.json` and
+  `row_counts.json`, and a Silver/Gold row-count mismatch makes `run()`
+  fail and roll back
 
 ---
 ## Requirements coverage
@@ -240,9 +287,11 @@ throwaway Postgres schema (created and dropped per test — the real
 | Repeated loads create no duplicates | Section 6 (truncate-then-insert) |
 | Every row traceable to its Silver source | `source_record_id` on experiment and shot (Section 2) |
 | Reconciled row counts, not just a single number | Section 7 |
+| Input hashes, times and counts recorded | Section 7 (`run.json`) |
+| Detector storage measured and explained | Section 4 |
 | No invented cross-source relationship | Section 9 |
 
-All 14 tests pass: `cd starter && uv run pytest tests/test_load_postgres.py`
+All 23 tests pass: `cd starter && uv run pytest tests/test_load_postgres.py`
 
 ## 9. Explicitly rejected relationship
 
@@ -254,10 +303,15 @@ intentional, evidence-based design decision, not an oversight.
 
 ---
 
-## 10. Open items (team-level, not resolved in this document)
+## 10. Shared Gold schema and open items
 
-- Whether Gold tables should live in a dedicated `gold` schema instead of
-  `public`
+All Gold tables now live in the dedicated `gold` schema, not `public`.
+`run()` loads `google_qec` and `qec_syndromes` in the same transaction, so
+the whole Gold update is all-or-nothing across both sources: if either one
+fails, neither is committed.
+
+Still open at team level:
+
 - Shared cross-source vocabulary (e.g. a common `code_family` table, a
   consistently-named `distance` column across all three sources) —
   needed before any cross-source query or comparison can be written
