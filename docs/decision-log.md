@@ -39,7 +39,7 @@ supplied data. See `reports/silver_stage/silver_stage_syndromes.md`.
 Done. Yes — confirmed against the real Gold data, not just a synthetic test
 case. `test_same_syndrome_both_labels_are_both_kept` proves the code never
 dedupes a collision; querying the real dataset
-(`SELECT syndrome_bits FROM syndrome_observation GROUP BY syndrome_bits HAVING COUNT(DISTINCT logical_error_label) > 1`)
+(`SELECT syndrome_bits FROM gold_syndrome_observation GROUP BY syndrome_bits HAVING COUNT(DISTINCT logical_error_label) > 1`)
 shows **18,676 distinct patterns** occur under both labels across the 7
 files — this is common, not a rare edge case. Both rows are correctly
 retained for each one, not deduped.
@@ -51,13 +51,13 @@ Resolved, differently than the original candidate. Silver's
 `(experiment_id, syndromes, labels)`. This is simpler and still fully stable
 (same file + same row position -> same id on every rerun), and doesn't
 require re-hashing the full syndrome value. The content-based composite key
-idea was used instead at the Gold layer: `syndrome_observation.observation_id`
+idea was used instead at the Gold layer: `gold_syndrome_observation.observation_id`
 is `sha256(experiment_id:syndrome_bits:label)`, matching this table's
 `UNIQUE (experiment_id, syndrome_bits, logical_error_label)` constraint. See
 `reports/gold_stage/gold_stage_syndromes.md`, decision 4.
 
 ### Which aggregates must use `quantity` as a weight? — *Stage: Gold/ML (Silver only carries `quantity` through unchanged)*
-Done for Gold's analysis query. `reports/gold_stage/query1_weighted_syndrome_by_fault_rate.sql`
+Done for Gold's analysis query. `starter/results/part1/analysis/query1_weighted_syndrome_by_fault_rate.sql`
 computes exactly `sum(quantity) GROUP BY (physical_fault_rate, logical_error_label)`
 — confirms the weighted, not row-count, logical-error share rises from
 ~0.02% at fault rate 0.00001 to ~18.6% at 0.01. Still open: which ML-side

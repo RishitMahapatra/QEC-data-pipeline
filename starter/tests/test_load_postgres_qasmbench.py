@@ -465,8 +465,9 @@ def test_truncate_cascade_clears_all_dependent_tables(pg_schema, monkeypatch) ->
 
 def test_failed_load_keeps_previous_data_intact(pg_schema, monkeypatch) -> None:
     """Load once successfully, then simulate a failure partway through a
-    second load (bad Silver data - an empty data_qubits array). The previous
-    complete data must remain - nothing should be half-overwritten."""
+    second load (bad Silver data - a negative condition_value, rejected by
+    its CHECK after the circuit and checks were already re-inserted). The
+    previous complete data must remain - nothing should be half-overwritten."""
     settings, schema_name, conn = pg_schema
     monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_with_hash)
 
@@ -476,13 +477,13 @@ def test_failed_load_keeps_previous_data_intact(pg_schema, monkeypatch) -> None:
     lp.load_qasmbench_gold(conn, settings)
     conn.commit()
 
-    bad_checks = [{**TWO_CHECKS[0], "data_qubits": []}]
+    bad_corrections = [{**THREE_CORRECTIONS[0], "condition_value": -1}]
 
     def _fake_read_bad(_settings, object_name: str) -> tuple[pa.Table, str]:
         if "stabilizer_check" in object_name:
-            table = pa.Table.from_pylist(bad_checks)
+            table = pa.Table.from_pylist(TWO_CHECKS)
         elif "conditional_correction" in object_name:
-            table = pa.Table.from_pylist(THREE_CORRECTIONS)
+            table = pa.Table.from_pylist(bad_corrections)
         else:
             table = pa.Table.from_pylist(ONE_CIRCUIT)
         return table, f"fake-hash-{object_name}"
@@ -526,3 +527,85 @@ def test_load_qasmbench_detects_row_count_mismatch_and_raises(pg_schema, monkeyp
     with pytest.raises(RuntimeError, match="do not match Silver"):
         lp._load_qasmbench(conn, settings)
     conn.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Shared QEC vocabulary: code_family / distance labels
+# ---------------------------------------------------------------------------
+
+
+def test_load_labels_qec_sm_n5_as_distance_three_repetition_code(pg_schema, monkeypatch) -> None:
+    settings, schema_name, conn = pg_schema
+    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_with_hash)
+
+    with conn.cursor() as cur:
+        cur.execute(lp.QASMBENCH_GOLD_SCHEMA_SQL)
+    lp.load_qasmbench_gold(conn, settings)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT code_family, distance FROM gold_qasmbench_circuit WHERE circuit_id = 'qec_sm_n5:source';")
+        assert cur.fetchone() == ("repetition_code", 3)
+
+
+def test_load_leaves_circuits_without_explicit_code_unlabelled(pg_schema, monkeypatch) -> None:
+    """A benchmark with no explicit parity-check structure (e.g.
+    error_correctiond3_n5) must get NULL, not a guessed label."""
+    settings, schema_name, conn = pg_schema
+    unlabelled_circuit = [{
+        **ONE_CIRCUIT[0], "source_record_id": "circ-src-2", "circuit_id": "qec_en_n5:source",
+        "benchmark_name": "qec_en_n5",
+    }]
+
+    def _fake_read(_settings, object_name: str) -> tuple[pa.Table, str]:
+        if "stabilizer_check" in object_name:
+            table = pa.Table.from_pylist([], schema=pa.Table.from_pylist(TWO_CHECKS).schema)
+        elif "conditional_correction" in object_name:
+            table = pa.Table.from_pylist([], schema=pa.Table.from_pylist(THREE_CORRECTIONS).schema)
+        else:
+            table = pa.Table.from_pylist(unlabelled_circuit)
+        return table, f"fake-hash-{object_name}"
+
+    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read)
+
+    with conn.cursor() as cur:
+        cur.execute(lp.QASMBENCH_GOLD_SCHEMA_SQL)
+    lp.load_qasmbench_gold(conn, settings)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT code_family, distance FROM gold_qasmbench_circuit;")
+        assert cur.fetchone() == (None, None)
+
+
+def test_load_rejects_repetition_code_label_that_disagrees_with_silver(pg_schema, monkeypatch) -> None:
+    """qec_sm_n5 is labelled distance 3 (2 checks over 3 data qubits); if
+    Silver ever had only one check for it, the load must raise instead of
+    storing a label the parsed circuit does not support."""
+    settings, schema_name, conn = pg_schema
+
+    def _fake_read_one_check(_settings, object_name: str) -> tuple[pa.Table, str]:
+        if "stabilizer_check" in object_name:
+            return pa.Table.from_pylist(TWO_CHECKS[:1]), f"fake-hash-{object_name}"
+        return _fake_read_with_hash(_settings, object_name)
+
+    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_one_check)
+
+    with conn.cursor() as cur:
+        cur.execute(lp.QASMBENCH_GOLD_SCHEMA_SQL)
+    with pytest.raises(ValueError, match="repetition_code distance 3"):
+        lp.load_qasmbench_gold(conn, settings)
+    conn.rollback()
+
+
+def test_circuit_rejects_code_family_without_distance(pg_schema) -> None:
+    settings, schema_name, conn = pg_schema
+    with conn.cursor() as cur:
+        cur.execute(lp.QASMBENCH_GOLD_SCHEMA_SQL)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute(
+                "INSERT INTO gold_qasmbench_circuit "
+                "(circuit_id, source_record_id, benchmark_name, variant, qubit_count, measurement_count, "
+                " two_qubit_gate_count, code_family, distance) "
+                "VALUES ('x:source', 'x', 'x', 'source', 5, 5, 4, 'repetition_code', NULL)"
+            )

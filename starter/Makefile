@@ -9,7 +9,7 @@ help:
 	@echo ""
 	@echo "  make check      Verify object-store and PostgreSQL connections"
 	@echo "  make inventory  List the supplied course data files"
-	@echo "  make run        Run your pipeline after implementing the stages"
+	@echo "  make run        Run all of Part I: Bronze -> Silver -> Gold -> ML -> trace"
 	@echo "  make train      Train/evaluate models from the required ML input tables"
 	@echo "  make test       Run automated tests"
 

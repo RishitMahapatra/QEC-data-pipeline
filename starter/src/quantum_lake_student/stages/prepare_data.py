@@ -893,6 +893,10 @@ SYNDROMES_SILVER_SCHEMA = pa.schema([
     ("check_count", pa.int32()),
     ("logical_error_label", pa.bool_()),
     ("quantity", pa.int64()),
+    # extra column (allowed by silver-tables.md): code distance from the
+    # filename's d-<distance> part, so Gold can label experiments without
+    # re-reading Bronze filenames
+    ("distance", pa.int32()),
 ])
 
 SILVER_SYNDROMES_PATH = "silver/qec_syndromes/syndrome_observation.parquet"
@@ -979,6 +983,7 @@ def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
                     reason="filename does not match d-<distance>_pfr-<rate>_nb-<n>.csv",
                 ))
                 continue
+            distance = int(match.group(1))
             fault_rate = float(match.group(2))
             experiment_id = _syndromes_experiment_id(member)
 
@@ -1090,6 +1095,7 @@ def build_syndromes(bronze_bytes: bytes, input_sha256: str) -> tuple[
                         "check_count": 4,
                         "logical_error_label": bool(int(label)),
                         "quantity": quantity,
+                        "distance": distance,
                     })
 
                 # checks that the total quantity of everything kept

@@ -303,15 +303,35 @@ intentional, evidence-based design decision, not an oversight.
 
 ---
 
-## 10. Shared Gold schema and open items
+## 10. Part I analysis question 2
 
-All Gold tables now live in the dedicated `gold` schema, not `public`.
-`run()` loads `google_qec` and `qec_syndromes` in the same transaction, so
-the whole Gold update is all-or-nothing across both sources: if either one
-fails, neither is committed.
+`assignment/brief.md`'s second Part I analysis question is google_qec's:
+"How do the supplied decoder logical-error rates compare by code distance
+and distance-three processor location?" Answered by
+[`query2_google_decoder_error_by_distance_and_location.sql`](../../starter/results/part1/analysis/query2_google_decoder_error_by_distance_and_location.sql),
+a 3-table join (`gold_google_experiment`, `gold_google_decoder_prediction`,
+`gold_google_shot`). The decoder table split from Section 5 is what makes it
+short: a decoder's logical-error rate is the share of its
+`gold_google_decoder_prediction` rows with `was_wrong = true`, grouped by
+experiment. On the real release, every decoder beats the majority baseline
+(about 0.38–0.45 vs 0.49–0.50); tensor-network contraction and belief
+matching lead at every location, PyMatching trails; rates differ by up to
+about 0.03 between distance-3 locations; and the single distance-5
+experiment falls inside the distance-3 range, so distance and location cannot
+be separated in this release. See the SQL file for the full result table and
+interpretation.
 
-Still open at team level:
+---
 
-- Shared cross-source vocabulary (e.g. a common `code_family` table, a
-  consistently-named `distance` column across all three sources) —
-  needed before any cross-source query or comparison can be written
+## 11. Shared Gold schema and shared vocabulary
+
+All Gold tables live in the dedicated `gold` schema, not `public`. `run()`
+loads `google_qec`, `qec_syndromes` and `qasmbench` in the same transaction,
+so the whole Gold update is all-or-nothing across all three sources.
+
+The shared cross-source vocabulary that was listed here as an open item is
+now in place: `gold_google_experiment` carries `code_family = 'surface_code'`
+next to its existing `distance`, like every other source's experiment or
+circuit table, and the three sources are listed side by side in the
+`v_qec_experiment_catalog` view. See
+[gold_shared_vocabulary.md](gold_shared_vocabulary.md).

@@ -20,8 +20,31 @@ Read these documents in order:
 The starter deliberately does not contain domain transformations, target
 business tables, feature builders, or fitted models. `make check` verifies
 connections, `make inventory` lists the three Bronze objects, and `make test`
-checks low-level utilities. `make run` and `make train` stop at separate
-unimplemented boundaries; replace both with your orchestrated stages.
+checks low-level utilities. `make train` still stops at an unimplemented
+boundary (Part II).
+
+## Running Part I
+
+From a JupyterLab terminal in the workspace container (`/workspace`):
+
+```bash
+make run
+```
+
+runs every Part I stage in order with one shared `run_id`, and stops at the
+first stage that fails:
+
+| Stage | Does | Writes |
+| --- | --- | --- |
+| `register_sources` | verifies the unchanged Bronze objects and archive members | `results/part1/run.json`, `row_counts.json` |
+| `prepare_data` | Bronze -> the six Silver Parquet tables | `silver/...`, `results/part1/source_trace.parquet`, `data_issues.parquet` |
+| `load_postgres` | Silver -> Gold PostgreSQL (schema `gold`), all-or-nothing, plus the catalog and ML views | Gold tables and views |
+| `build_ml_tables` | Gold views -> the two ML tables, contract checks, the three analysis queries | `ml/...`, `results/part1/analysis/query*_result.csv` |
+| `trace_examples` | follows one syndrome and one Google example from ML down to the raw Bronze record | `results/part1/trace_examples.json` |
+
+A full run takes about 30 seconds. Running it twice on unchanged input gives
+identical Silver/ML files and identical Gold rows. Silver and ML live in the
+MinIO bucket (`http://localhost:9001`), not in this folder.
 
 Suggested source layout:
 

@@ -330,7 +330,7 @@ evidence-based design decision, not an oversight — `assignment/brief.md`:
 `assignment/brief.md`'s third Part I analysis question is qasmbench's:
 "How does the repetition-code circuit map data qubits to parity-check
 ancillas, syndrome bits, and conditional corrections?" Answered by
-[`query3_qasmbench_circuit_mapping.sql`](query3_qasmbench_circuit_mapping.sql),
+[`query3_qasmbench_circuit_mapping.sql`](../../starter/results/part1/analysis/query3_qasmbench_circuit_mapping.sql),
 a 4-table join (`gold_qasmbench_circuit`, `gold_qasmbench_stabilizer_check`,
 `gold_qasmbench_register`, `gold_qasmbench_conditional_correction`) — this is
 also the join across three or more Gold tables the brief requires from at

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+import uuid
+from collections.abc import Callable
+from datetime import datetime
 
 from rich.console import Console
 from rich.table import Table
 
 from .config import Settings
 from .connections import bronze_inventory, check_platform
+from .models import RESULTS_PART1, UTC, code_revision, merge_json_file
 
 
 console = Console()
@@ -32,13 +37,62 @@ def command_inventory(settings: Settings) -> int:
     return 0
 
 
+def part1_stages() -> list[tuple[str, Callable[[str], object]]]:
+    """Part I stages in dependency order: Bronze -> Silver -> Gold -> ML -> trace.
+
+    Imported here, not at module level, so `check`/`inventory` stay fast.
+    """
+    from .stages import build_ml_tables, load_postgres, prepare_data, register_sources, trace_examples
+
+    return [
+        ("register_sources", register_sources.run),  # verify unchanged Bronze
+        ("prepare_data", prepare_data.run),          # Bronze -> six Silver tables + issues/trace
+        ("load_postgres", load_postgres.run),        # Silver -> Gold (all-or-nothing) + views
+        ("build_ml_tables", build_ml_tables.run),    # Gold -> two ML tables + analysis results
+        ("trace_examples", trace_examples.run),      # ML -> Gold -> Silver -> Bronze proof
+    ]
+
+
 def command_run(_: Settings) -> int:
-    console.print(
-        "[yellow]Pipeline stages are intentionally unimplemented.[/yellow]\n"
-        "Implement your pipeline modules under src/quantum_lake_student, then "
-        "replace this command with your orchestrated Part I runner."
+    """Run all of Part I with one command. Every stage gets the same run_id, so
+    their run.json entries belong together; the first failing stage stops the run."""
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(UTC)
+    summary = Table(title=f"Part I run {run_id}")
+    for column, justify in (("Stage", "left"), ("Input", "right"), ("Output", "right"),
+                            ("Issues", "right"), ("Seconds", "right")):
+        summary.add_column(column, justify=justify)
+
+    completed = []
+    for name, stage_run in part1_stages():
+        console.print(f"[cyan]>[/cyan] {name} ...")
+        stage_started = time.perf_counter()
+        try:
+            result = stage_run(run_id)
+        except Exception as exc:  # report which stage failed, then stop
+            console.print(summary)
+            console.print(f"[red]FAILED[/red] {name}: {type(exc).__name__}: {exc}")
+            return 1
+        seconds = time.perf_counter() - stage_started
+        summary.add_row(name, f"{result.input_count:,}", f"{result.output_count:,}",
+                        f"{result.issue_count:,}", f"{seconds:.1f}")
+        completed.append({"stage": name, "seconds": round(seconds, 1)})
+
+    RESULTS_PART1.mkdir(parents=True, exist_ok=True)
+    merge_json_file(
+        RESULTS_PART1 / "run.json",
+        "pipeline",
+        payload={
+            "run_id": run_id,
+            "code_revision": code_revision(),
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now(UTC).isoformat(),
+            "stages": completed,
+        },
     )
-    return 2
+    console.print(summary)
+    console.print(f"[green]OK[/green] Part I finished; evidence in {RESULTS_PART1}/")
+    return 0
 
 
 def command_train(_: Settings) -> int:

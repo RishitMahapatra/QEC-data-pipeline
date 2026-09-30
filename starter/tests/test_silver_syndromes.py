@@ -45,6 +45,7 @@ def test_known_good_row_parses_correctly():
     assert row["quantity"] == 100
     assert row["round_count"] == 4
     assert row["check_count"] == 4
+    assert row["distance"] == 3  # from the d-3_ filename prefix
     # round-major, check-second: round 1 has a single set bit at check index 2
     assert row["syndrome_bits"] == bytes([
         0, 0, 0, 0,
@@ -63,7 +64,7 @@ def test_schema_matches_silver_contract():
 
     assert table.schema.names == [
         "source_record_id", "experiment_id", "physical_fault_rate", "syndrome_bits",
-        "round_count", "check_count", "logical_error_label", "quantity",
+        "round_count", "check_count", "logical_error_label", "quantity", "distance",
     ]
     assert table.schema.field("syndrome_bits").type == pa.binary()
     assert table.schema.field("physical_fault_rate").type == pa.float64()
@@ -71,6 +72,7 @@ def test_schema_matches_silver_contract():
     assert table.schema.field("check_count").type == pa.int32()
     assert table.schema.field("logical_error_label").type == pa.bool_()
     assert table.schema.field("quantity").type == pa.int64()
+    assert table.schema.field("distance").type == pa.int32()
 
 
 def test_wrong_header_skips_file():
