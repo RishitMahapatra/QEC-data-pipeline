@@ -8,7 +8,12 @@ starter/lake/
 starter/reports/
 starter/.coverage
 datasets/
-results/
+# generated evidence under results/ stays out of git, except the committed
+# Part I analysis SQL (brief.md: the three analyses use reproducible SQL)
+**/results/**
+!**/results/**/
+!starter/results/README.md
+!starter/results/part1/analysis/*.sql
 *.parquet
 *.pyc
 .ipynb_checkpoints/

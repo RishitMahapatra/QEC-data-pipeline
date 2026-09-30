@@ -18,6 +18,7 @@ except ImportError:
     class StrEnum(str, Enum):
         pass
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -28,8 +29,11 @@ RESULTS_PART1 = Path("results/part1")  # the folder where all Part I evidence fi
 def code_revision() -> str:
     """Best-effort git commit hash for the code that produced this run.
 
-    Falls back to "unknown" outside a git checkout instead of failing the
-    stage - no stage should depend on git being available.
+    Tries `git rev-parse HEAD` first (works on a normal checkout). The course
+    workspace container has no git binary and mounts only starter/, so
+    compose.yaml also mounts the repository's .git read-only and sets
+    REPO_GIT_DIR; the commit is then read from it directly. Falls back to
+    "unknown" instead of failing the stage - no stage should depend on git.
     """
     try:
         completed = subprocess.run(
@@ -40,7 +44,34 @@ def code_revision() -> str:
         )
         return completed.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return "unknown"
+        pass
+    git_dir = os.environ.get("REPO_GIT_DIR")
+    return revision_from_git_dir(Path(git_dir)) if git_dir else "unknown"
+
+
+def revision_from_git_dir(git_dir: Path) -> str:
+    """Resolve HEAD to a commit hash by reading a .git directory, without git.
+
+    HEAD is either a commit hash (detached) or "ref: refs/heads/<branch>";
+    a branch's hash is in its loose ref file, or in packed-refs after gc.
+    """
+    try:
+        head = (git_dir / "HEAD").read_text().strip()
+        if not head.startswith("ref: "):
+            return head
+        ref = head[len("ref: "):]
+        loose = git_dir / ref
+        if loose.exists():
+            return loose.read_text().strip()
+        packed = git_dir / "packed-refs"
+        if packed.exists():
+            for line in packed.read_text().splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return parts[0]
+    except OSError:
+        pass
+    return "unknown"
 
 
 def merge_json_file(path: Path, *keys: str, payload: dict) -> None:

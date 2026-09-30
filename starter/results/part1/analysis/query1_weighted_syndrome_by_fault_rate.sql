@@ -2,16 +2,18 @@
 -- "How do weighted syndrome frequency and logical-error labels change with
 -- physical fault rate?"
 --
--- Joins gold.syndrome_observation to gold.syndrome_experiment and sums the
+-- Joins gold.gold_syndrome_observation to gold.gold_syndrome_experiment and sums the
 -- `quantity` weight (not row counts) per (fault_rate, label) pair, since a
 -- single Silver/Gold row can represent millions of physical observations.
+
+SET search_path TO gold;
 
 SELECT
     e.physical_fault_rate,
     o.logical_error_label,
     SUM(o.quantity) AS weighted_count
-FROM syndrome_observation o
-JOIN syndrome_experiment e ON e.experiment_id = o.experiment_id
+FROM gold_syndrome_observation o
+JOIN gold_syndrome_experiment e ON e.experiment_id = o.experiment_id
 GROUP BY e.physical_fault_rate, o.logical_error_label
 ORDER BY e.physical_fault_rate, o.logical_error_label;
 

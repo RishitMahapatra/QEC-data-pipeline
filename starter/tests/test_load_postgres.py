@@ -98,12 +98,12 @@ SYNDROME_ROWS = [
     {
         "source_record_id": "syn-src-0", "experiment_id": "syn-exp-1", "physical_fault_rate": 0.0001,
         "syndrome_bits": bytes([0] * 6 + [1] + [0] * 9), "round_count": 4, "check_count": 4,
-        "logical_error_label": False, "quantity": 100,
+        "logical_error_label": False, "quantity": 100, "distance": 3,
     },
     {
         "source_record_id": "syn-src-1", "experiment_id": "syn-exp-1", "physical_fault_rate": 0.0001,
         "syndrome_bits": bytes([0] * 6 + [1] + [0] * 9), "round_count": 4, "check_count": 4,
-        "logical_error_label": True, "quantity": 30,
+        "logical_error_label": True, "quantity": 30, "distance": 3,
     },
 ]
 
@@ -169,12 +169,13 @@ def _insert_experiment(cur, **overrides) -> None:
     cur.execute(
         """
         INSERT INTO gold_google_experiment
-            (experiment_id, source_record_id, basis, distance, rounds, shots, center_row, center_col,
+            (experiment_id, source_record_id, basis, code_family, distance, rounds, shots, center_row, center_col,
              measurement_count, detector_count)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
-            row["experiment_id"], row["source_record_id"], row["basis"], row["distance"], row["rounds"],
+            row["experiment_id"], row["source_record_id"], row["basis"], row.get("code_family", "surface_code"),
+            row["distance"], row["rounds"],
             row["shots"], row["center_row"], row["center_col"], row["measurement_count"], row["detector_count"],
         ),
     )
@@ -491,6 +492,20 @@ def test_load_google_gold_preserves_source_record_id_for_tracing(pg_schema, monk
         assert cur.fetchall() == [(0, "shot-src-0"), (1, "shot-src-1")]
 
 
+def test_load_google_gold_labels_experiments_with_shared_vocabulary(pg_schema, monkeypatch) -> None:
+    settings, schema_name, conn = pg_schema
+    monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_with_hash)
+
+    with conn.cursor() as cur:
+        cur.execute(lp.GOOGLE_GOLD_SCHEMA_SQL)
+    lp.load_google_gold(conn, settings)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT code_family, distance FROM gold_google_experiment WHERE experiment_id = 'exp-1';")
+        assert cur.fetchone() == ("surface_code", 3)
+
+
 def test_load_google_gold_copies_experiment_counts_onto_each_shot(pg_schema, monkeypatch) -> None:
     settings, schema_name, conn = pg_schema
     monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_with_hash)
@@ -635,7 +650,7 @@ def test_run_writes_gold_and_run_evidence(pg_schema, monkeypatch, tmp_path) -> N
         assert cur.fetchone()[0] == 2
         cur.execute("SELECT COUNT(*) FROM gold_google_decoder_prediction;")
         assert cur.fetchone()[0] == 8
-        cur.execute("SELECT COUNT(*) FROM syndrome_observation;")
+        cur.execute("SELECT COUNT(*) FROM gold_syndrome_observation;")
         assert cur.fetchone()[0] == 2
         cur.execute("SELECT COUNT(*) FROM gold_qasmbench_circuit;")
         assert cur.fetchone()[0] == 1
@@ -645,6 +660,22 @@ def test_run_writes_gold_and_run_evidence(pg_schema, monkeypatch, tmp_path) -> N
         assert cur.fetchone()[0] == 2
         cur.execute("SELECT COUNT(*) FROM gold_qasmbench_conditional_correction;")
         assert cur.fetchone()[0] == 3
+
+        # shared-vocabulary view: one row per experiment/circuit, sources stacked, never joined
+        cur.execute(
+            "SELECT source_name, entity_kind, entity_id, code_family, distance, rounds "
+            "FROM v_qec_experiment_catalog ORDER BY source_name;"
+        )
+        assert cur.fetchall() == [
+            ("google_qec", "experiment", "exp-1", "surface_code", 3, 25),
+            ("qasmbench", "circuit", "qec_sm_n5:source", "repetition_code", 3, None),
+            ("qec_syndromes", "experiment", "syn-exp-1", "surface_code", 3, 4),
+        ]
+
+    run_syndromes = json.loads((results_root / "run.json").read_text())["load_postgres"]["qec_syndromes"]
+    assert set(run_syndromes["output_row_counts"]) == {
+        "gold_syndrome_experiment", "gold_syndrome_pattern", "gold_syndrome_observation",
+    }
 
     # every source writes its own evidence into the shared results files
     syndromes_counts = json.loads((results_root / "row_counts.json").read_text())["load_postgres"]["qec_syndromes"]
@@ -746,16 +777,16 @@ def test_run_rolls_back_google_when_syndromes_load_fails(pg_schema, monkeypatch,
 
 def test_run_rolls_back_google_and_syndromes_when_qasmbench_load_fails(pg_schema, monkeypatch, tmp_path) -> None:
     """All three sources load in one transaction: if the qasmbench part
-    fails (here: an empty data_qubits array violates its CHECK), the Google
+    fails (here: a negative condition_value violates its CHECK), the Google
     and syndromes tables loaded earlier in the same run must be rolled back
     too - mirrors test_run_rolls_back_google_when_syndromes_load_fails."""
     settings, schema_name, _fixture_conn = pg_schema
 
-    bad_qasmbench_checks = [{**TWO_QASMBENCH_CHECKS[0], "data_qubits": []}]
+    bad_qasmbench_corrections = [{**THREE_QASMBENCH_CORRECTIONS[0], "condition_value": -1}]
 
     def _fake_read_bad_qasmbench(_settings, object_name: str):
-        if "qasmbench" in object_name and "stabilizer_check" in object_name:
-            return pa.Table.from_pylist(bad_qasmbench_checks), f"fake-hash-{object_name}"
+        if "qasmbench" in object_name and "conditional_correction" in object_name:
+            return pa.Table.from_pylist(bad_qasmbench_corrections), f"fake-hash-{object_name}"
         return _fake_read_all_sources(_settings, object_name)
 
     monkeypatch.setattr(lp, "_read_silver_parquet_with_hash", _fake_read_bad_qasmbench)
@@ -779,7 +810,7 @@ def test_run_rolls_back_google_and_syndromes_when_qasmbench_load_fails(pg_schema
         assert cur.fetchone()[0] is False
         cur.execute(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = %s AND table_name = 'syndrome_observation');",
+            "WHERE table_schema = %s AND table_name = 'gold_syndrome_observation');",
             (schema_name,),
         )
         assert cur.fetchone()[0] is False
