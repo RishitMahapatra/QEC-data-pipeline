@@ -95,7 +95,7 @@ COMMENT ON TABLE gold_google_experiment IS
     'One row represents one Google hardware experiment configuration (a distance/rounds/processor-location combination).';
 
 CREATE TABLE IF NOT EXISTS gold_google_shot ( -- for the single shots
-    experiment_id                          TEXT NOT NULL REFERENCES gold_google_experiment(experiment_id), 
+    experiment_id                          TEXT NOT NULL REFERENCES gold_google_experiment(experiment_id), -- which experiment this shot was run in
     measurement_count INTEGER NOT NULL,  -- copied from the experiment row so byte-length checks below can reference it without a cross-table query
     detector_count INTEGER NOT NULL, -- same reasoning as the above -> measurement count 
     source_record_id TEXT NOT NULL UNIQUE, -- traces which Silver row this Gold row came from
@@ -129,7 +129,7 @@ CREATE INDEX IF NOT EXISTS idx_google_shot_experiment_id ON gold_google_shot(exp
 -- One row per decoder algorithm (4 rows total for google_qec)
 
 CREATE TABLE IF NOT EXISTS gold_google_decoder (
-    decoder_name TEXT PRIMARY KEY
+    decoder_name TEXT PRIMARY KEY -- name of the supplied decoder, taken from its obs_flips_predicted_by_<decoder>.01 file
 );
 
 COMMENT ON TABLE gold_google_decoder IS
@@ -138,13 +138,13 @@ COMMENT ON TABLE gold_google_decoder IS
 -- One row per shot per decoder, separating "what it guessed" from "whether it was wrong"
 
 CREATE TABLE IF NOT EXISTS gold_google_decoder_prediction (
-    experiment_id     TEXT NOT NULL,
-    shot_index        INTEGER NOT NULL,
-    decoder_name      TEXT NOT NULL REFERENCES gold_google_decoder(decoder_name),
-    predicted_flip    BOOLEAN NOT NULL,
-    was_wrong         BOOLEAN NOT NULL,
-    PRIMARY KEY (experiment_id, shot_index, decoder_name),
-    FOREIGN KEY (experiment_id, shot_index) REFERENCES gold_google_shot(experiment_id, shot_index)
+    experiment_id     TEXT NOT NULL, -- experiment of the shot being decoded
+    shot_index        INTEGER NOT NULL, -- zero-based shot position within that experiment; with experiment_id identifies the shot
+    decoder_name      TEXT NOT NULL REFERENCES gold_google_decoder(decoder_name), -- which of the 4 supplied decoders made this prediction
+    predicted_flip    BOOLEAN NOT NULL, -- the decoder's guess: TRUE if it predicts the logical observable flipped
+    was_wrong         BOOLEAN NOT NULL, -- decoder mistake: TRUE when predicted_flip differs from the shot's actual_observable_flip
+    PRIMARY KEY (experiment_id, shot_index, decoder_name), -- one prediction per decoder per shot
+    FOREIGN KEY (experiment_id, shot_index) REFERENCES gold_google_shot(experiment_id, shot_index) -- every prediction belongs to a loaded shot
 );
 COMMENT ON TABLE gold_google_decoder_prediction IS
     'One row per shot per decoder: what that decoder predicted, and whether it disagreed with the actual outcome.';
@@ -293,12 +293,12 @@ SYNDROMES_CODE_FAMILY = "surface_code"
 # code_family/distance are the shared-vocabulary columns every source carries.
 SYNDROME_EXPERIMENT_DDL = """
 CREATE TABLE IF NOT EXISTS gold_syndrome_experiment (
-    experiment_id       TEXT PRIMARY KEY,
-    code_family         TEXT NOT NULL CHECK (code_family IN ('surface_code', 'repetition_code')),
-    distance            INT NOT NULL CHECK (distance > 0),
-    physical_fault_rate NUMERIC NOT NULL CHECK (physical_fault_rate > 0 AND physical_fault_rate < 1),
-    round_count         INT NOT NULL CHECK (round_count = 4),
-    check_count         INT NOT NULL CHECK (check_count = 4)
+    experiment_id       TEXT PRIMARY KEY, -- "qec_syndromes:<csv filename>", one per fault-rate file, stable across runs
+    code_family         TEXT NOT NULL CHECK (code_family IN ('surface_code', 'repetition_code')), -- shared vocabulary label, same column in every source
+    distance            INT NOT NULL CHECK (distance > 0), -- code distance from the filename (d-3); shared vocabulary
+    physical_fault_rate NUMERIC NOT NULL CHECK (physical_fault_rate > 0 AND physical_fault_rate < 1), -- simulated per-operation fault probability from the filename (pfr-...)
+    round_count         INT NOT NULL CHECK (round_count = 4), -- syndrome-measurement rounds per sample; always 4 in this source
+    check_count         INT NOT NULL CHECK (check_count = 4) -- stabilizer checks measured per round; always 4 in this source
 );
 COMMENT ON TABLE gold_syndrome_experiment IS
     'One row represents one simulated physical-fault-rate experiment (one source CSV file).';
@@ -310,8 +310,8 @@ COMMENT ON TABLE gold_syndrome_experiment IS
 # Silver already validated.
 SYNDROME_PATTERN_DDL = """
 CREATE TABLE IF NOT EXISTS gold_syndrome_pattern (
-    syndrome_bits          BYTEA PRIMARY KEY CHECK (encode(syndrome_bits, 'hex') ~ '^(0[01]){16}$'),
-    triggered_check_count  INT NOT NULL CHECK (triggered_check_count BETWEEN 0 AND 16)
+    syndrome_bits          BYTEA PRIMARY KEY CHECK (encode(syndrome_bits, 'hex') ~ '^(0[01]){16}$'), -- 16 one-byte 0/1 values, round first then check (4 rounds x 4 checks)
+    triggered_check_count  INT NOT NULL CHECK (triggered_check_count BETWEEN 0 AND 16) -- how many of the 16 check results are 1
 );
 COMMENT ON TABLE gold_syndrome_pattern IS
     'One row represents one distinct 16-bit syndrome pattern, seen in any experiment.';
@@ -323,13 +323,13 @@ COMMENT ON TABLE gold_syndrome_pattern IS
 # Gold row traces back to exactly one Silver row, never shared.
 SYNDROME_OBSERVATION_DDL = """
 CREATE TABLE IF NOT EXISTS gold_syndrome_observation (
-    observation_id       TEXT PRIMARY KEY,
-    experiment_id        TEXT NOT NULL REFERENCES gold_syndrome_experiment (experiment_id),
-    syndrome_bits         BYTEA NOT NULL REFERENCES gold_syndrome_pattern (syndrome_bits),
-    logical_error_label   BOOLEAN NOT NULL,
-    quantity              BIGINT NOT NULL CHECK (quantity > 0),
-    source_record_id      TEXT NOT NULL UNIQUE,
-    UNIQUE (experiment_id, syndrome_bits, logical_error_label)
+    observation_id       TEXT PRIMARY KEY, -- deterministic hash of (experiment_id, syndrome_bits, label), stable across runs
+    experiment_id        TEXT NOT NULL REFERENCES gold_syndrome_experiment (experiment_id), -- which fault-rate file this row came from
+    syndrome_bits         BYTEA NOT NULL REFERENCES gold_syndrome_pattern (syndrome_bits), -- the 16-bit syndrome pattern observed
+    logical_error_label   BOOLEAN NOT NULL, -- source `labels` value: TRUE if a logical error occurred
+    quantity              BIGINT NOT NULL CHECK (quantity > 0), -- physical observations this row represents; the weight for every aggregate
+    source_record_id      TEXT NOT NULL UNIQUE, -- traces which Silver row this Gold row came from
+    UNIQUE (experiment_id, syndrome_bits, logical_error_label) -- same pattern may appear with both labels, but only once per label per experiment
 );
 COMMENT ON TABLE gold_syndrome_observation IS
     'One row represents one (experiment, syndrome pattern, logical-error label) combination and its quantity weight.';
@@ -506,7 +506,7 @@ COMMENT ON TABLE gold_qasmbench_circuit IS
     'One row represents one parsed QASMBench circuit variant (a benchmark, as published or after transpilation).';
 
 CREATE TABLE IF NOT EXISTS gold_qasmbench_register ( -- one row per declared qreg/creg of one circuit variant
-    circuit_id      TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE,
+    circuit_id      TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE, -- which circuit variant declares this register
     register_kind   TEXT NOT NULL CHECK (register_kind IN ('qreg', 'creg')), -- quantum or classical register
     register_name   TEXT NOT NULL, -- e.g. "q", "a", "c", "syn"
     register_size   INTEGER NOT NULL CHECK (register_size > 0), -- declared register width must be positive
@@ -521,13 +521,13 @@ CREATE INDEX IF NOT EXISTS idx_qasmbench_register_circuit_id ON gold_qasmbench_r
 
 CREATE TABLE IF NOT EXISTS gold_qasmbench_stabilizer_check ( -- one row per detected parity-check relationship
     source_record_id  TEXT PRIMARY KEY, -- traces which Silver row this Gold row came from
-    circuit_id         TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE,
+    circuit_id         TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE, -- which circuit variant this parity check appears in
     check_id            TEXT NOT NULL, -- "<ancilla_qubit>#<occurrence>", unique within its circuit
     ancilla_qubit       TEXT NOT NULL, -- the qubit collecting the parity and being measured into syndrome_bit
     data_qubits         TEXT[] NOT NULL CHECK (cardinality(data_qubits) >= 1), -- the data qubits whose parity this check measures
     syndrome_bit         TEXT NOT NULL, -- the classical bit the ancilla is measured into
 
-    UNIQUE (circuit_id, check_id)
+    UNIQUE (circuit_id, check_id) -- a check_id is only unique within its own circuit
 );
 
 COMMENT ON TABLE gold_qasmbench_stabilizer_check IS
@@ -537,7 +537,7 @@ CREATE INDEX IF NOT EXISTS idx_qasmbench_stabilizer_check_circuit_id ON gold_qas
 
 CREATE TABLE IF NOT EXISTS gold_qasmbench_conditional_correction ( -- one row per syndrome-conditioned correction gate
     source_record_id    TEXT PRIMARY KEY, -- traces which Silver row this Gold row came from
-    circuit_id            TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE,
+    circuit_id            TEXT NOT NULL REFERENCES gold_qasmbench_circuit(circuit_id) ON DELETE CASCADE, -- which circuit variant this correction appears in
     condition_register    TEXT NOT NULL, -- the classical register the if(...) condition reads
     condition_value        BIGINT NOT NULL CHECK (condition_value >= 0), -- the syndrome value that triggers this correction
     gate                    TEXT NOT NULL, -- the single-qubit gate applied when the condition holds

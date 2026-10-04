@@ -17,14 +17,30 @@ You need Docker and Make installed, and a Bash-compatible terminal.
 ## Getting it running
 
 From this folder, run:
-`make bootstrap`
+`make bootstrap` 
 
 The first run will take a few minutes since it's pulling container images. Once it's done, it'll print out three localhost links (JupyterLab, MinIO, Adminer).
 
 Run `make help` any time to see other commands — checking status, resetting things, shutting down, etc.
 
-## Where to go next
 
-- Assignment instructions: `assignment/README.md`
-- Your actual coding workspace: `starter/README.md`
+## How to run the project
 
+From this folder (after running `make bootstrap`):
+
+```bash
+docker compose exec workspace make run     # Part 1
+docker compose exec workspace make train   # Part 2
+docker compose exec workspace make test    # tests
+```
+
+Runing Part 1 twice gives identical outputs and no duplicate records. For a run from scratch: `make reset-platform`, then `make bootstrap` again and the commands above.
+
+
+
+### Where to find everything:
+
+- **Part I design report (start here):** [reports/part1.md](reports/part1.md) and [reports/part2.md](reports/part2.md)
+- Discovery questions and evidence: [docs/decision-log.md](docs/decision-log.md)
+- Pipeline code and per-stage overview: [starter/README.md](starter/README.md)
+- Run evidence: `starter/results/part1/` (after `make run`)
