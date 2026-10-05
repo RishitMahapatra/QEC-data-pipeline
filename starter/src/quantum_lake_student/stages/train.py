@@ -1,8 +1,7 @@
-"""Part II training stage (Tasks A and B).
+"""Part II training stage (Tasks A, B and C).
 
-This stage reads the two ML Parquet files from the lake, trains and evaluates
-the Task A and Task B models, and writes everything to results/part2/. It
-never reads Gold, Silver or Bronze, and never writes to the lake.
+This stage reads the two ML Parquet files from the lake, trains and evaluates the Task A, Task B and Task C models, and writes everything to results/part2/.
+It never reads Gold, Silver or Bronze, and never writes to the lake.
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ import pyarrow.parquet as pq
 from sklearn.dummy import DummyClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, brier_score_loss
+from sklearn.neural_network import MLPClassifier
 
 from quantum_lake_student import connections
 from quantum_lake_student.config import Settings
@@ -40,85 +40,109 @@ from quantum_lake_student.ml import (
 from quantum_lake_student.models import StageResult, code_revision
 from quantum_lake_student.stages import register_sources
 
-SYNDROME_ML_PATH = "ml/ml_syndrome_decoder_example.parquet"
+#the two fixed lake object paths this stage is allowed to read — nothing else.
+SYNDROME_ML_PATH = "ml/ml_syndrome_decoder_example.parquet" 
 GOOGLE_ML_PATH = "ml/ml_google_decoder_example.parquet"
 
+#this is the directory where everything gets written
 RESULTS_PART2 = Path("results/part2")
 MODELS_DIR_NAME = "models"
 
-RANDOM_SEED = 4000
+RANDOM_SEED = 4000 #a single fixed seed reused everywhere a model needs one
 
 # Byte i of syndrome_bits is round i // 4, check i % 4.
 SYNDROME_FEATURE_ORDER = [f"round{r}_check{c}" for r in range(4) for c in range(4)]
 
-# Thresholds tried on validation: 0.01, 0.02, ..., 0.99.
+# Thresholds tried on validation: 0.01, 0.02, ..., 0.99. The fixed 0.01–0.99 grid (99 values) used everywhere a decision threshold is chosen on validation — defined once so Tasks A, B, C all search the identical grid.
 THRESHOLD_GRID = [round(0.01 * step, 2) for step in range(1, 100)]
 
-# Written from required-ml-tables.md, not imported from Part I, so the
-# consumer checks the file against the contract on its own.
+# Written from required-ml-tables.md, not imported from Part I, so the consumer checks the file against the contract on its own.
+'''
+The reason why we did that is because if Part II imported the schema straight from Part I's code, and someone later changed Part I by mistake, Part II would just go along with it without any warning. By typing the schema out again here by hand, Part II checks the actual file it received against its own copy of what it's supposed to look like. That's what lets it catch a mistake instead of blindly trusting Part I.
+'''
+#THIS IS THE SYNDROME INPUT SCHEMA 
 SYNDROME_INPUT_SCHEMA = pa.schema([
-    ("example_id", pa.string()),
-    ("experiment_id", pa.string()),
-    ("physical_fault_rate", pa.float64()),
-    ("syndrome_bits", pa.binary()),
-    ("round_count", pa.int32()),
+    ("example_id", pa.string()), #identifier
+    ("experiment_id", pa.string()), #identifier
+    ("physical_fault_rate", pa.float64()), #determines which split a row belongs to
+    ("syndrome_bits", pa.binary()), # the packed 16-bit binary blob
+    #The round count and the blob count is always expected to be 4 for both cause its a 4X4= 16 bits
+    ("round_count", pa.int32()), 
     ("check_count", pa.int32()),
-    ("logical_error_label", pa.bool_()),
-    ("sample_weight", pa.int64()),
-    ("data_split", pa.string()),
+    #THIS IS THE TARGET VARIABLE
+    ("logical_error_label", pa.bool_()),#output is 0 or 1 -> boolean values
+    ("sample_weight", pa.int64()), #this is the shot count a row represents
+    ("data_split", pa.string()), #it is the pre-assigned train/validation/test tag from Part I
 ])
 
+#THIS IS THE PREDICTION SCHEMA: it is the fixed output shape for every single prediction row this stage ever writes, across all three tasks and all models. One row = one model's prediction for one example in one split.
 PREDICTIONS_SCHEMA = pa.schema([
-    ("example_id", pa.string()),
+    ("example_id", pa.string()), #identifier that traces back to the same input row -> every prediction retains the example_id 
+    #The main purpose is to trace it across all the pipelines: from ML → Gold → Silver → Bronze
+    #task and model_id let predictions.parquet hold Task A, B, and C's outputs all mixed together in one file, distinguishable by these two columns
     ("task", pa.string()),
     ("model_id", pa.string()),
-    ("label", pa.bool_()),
-    ("prediction", pa.bool_()),
-    ("probability", pa.float64()),
-    ("split", pa.string()),
+    
+    ("label", pa.bool_()),#this is the true label / answer
+    ("prediction", pa.bool_()), #this is the model prediction 
+    ("probability", pa.float64()), #this can be nullable as the google decoders only give yes or no instead of any specific number
+    ("split", pa.string()), #This split means whether the particular data came from test, validation or train split. This will help the user to categorise of extract only the test split.
 ])
 
+#The three variables below are just string constants naming Task A and its two models, used consistently instead of retyping literal strings everywhere
 TASK_A = "task_a_syndrome"
 PRIOR_MODEL_ID = "task_a_weighted_prior"
 LOGISTIC_MODEL_ID = "task_a_weighted_logistic_regression"
 
+#GOOGLE INPUT SCHEMA FOR GOOGLE DATASETS: Includes the hand types schema description for the ml_google_decoder_example table
 GOOGLE_INPUT_SCHEMA = pa.schema([
-    ("example_id", pa.string()),
-    ("experiment_id", pa.string()),
-    ("shot_index", pa.int64()),
-    ("distance", pa.int32()),
-    ("rounds", pa.int32()),
+    ("example_id", pa.string()), #identifier for traceability
+    ("experiment_id", pa.string()), #identifier 
+    ("shot_index", pa.int64()), #identifies the shot and also decides its split via google_data_split
+    ("distance", pa.int32()),#the chip size -> only 3 or 5
+    ("rounds", pa.int32()), 
+    
+    #locate the experiment on the chip
     ("center_row", pa.int32()),
     ("center_col", pa.int32()),
+
+    #packed detector readings 
     ("detector_count", pa.int32()),
     ("detector_event_count", pa.int32()),
     ("detector_bits", pa.binary()),
+    #this unpacks the four supplied decoders' yes/no predictions (e.g. pymatching_prediction, etc.) into the schema in one line, instead of hardcoding four separate lines.
     *((name, pa.bool_()) for name in GOOGLE_META_PREDICTION_COLUMNS),
     ("actual_observable_flip", pa.bool_()),
     ("data_split", pa.string()),
 ])
 
-GOOGLE_DETECTOR_COUNTS = {3: 200, 5: 600}
+GOOGLE_DETECTOR_COUNTS = {3: 200, 5: 600} #for distance 3 -> 200 bits and for distance 5-> 600 bits 
 
-GOOGLE_FEATURE_ORDER = ["detector_event_density", *GOOGLE_META_PREDICTION_COLUMNS]
+GOOGLE_FEATURE_ORDER = ["detector_event_density", *GOOGLE_META_PREDICTION_COLUMNS] 
 
-TASK_B = "task_b_google"
+TASK_B = "task_b_google" #the string id naming Task B, same pattern as TASK_A before.
 
 
 def task_b_model_id(distance: int, name: str) -> str:
-    """This function builds a Task B model id, e.g. task_b_d3_pymatching."""
+    """This function builds a Task B model id, e.g. task_b_d3_pymatching.
+    Task B runs separately for distance 3 and distance 5, and each distance has its own prior baseline, its own four supplied decoders, and its own combined model — so every model needs a unique id that also says which distance it belongs to. This builds that id consistently, e.g. task_b_d3_prior, task_b_d5_combined_logistic. Without this, you'd risk typo'd or clashing ids scattered across the code."""
     return f"task_b_d{distance}_{name}"
 
 
 def decoder_name(column: str) -> str:
-    """This function turns 'pymatching_prediction' into 'pymatching'."""
+    """This function turns 'pymatching_prediction' into 'pymatching'.
+    The four supplied decoder columns in the input table are named like pymatching_prediction, union_find_prediction, etc. (ending in _prediction). This strips that suffix to get the plain decoder name (pymatching), which is then fed into task_b_model_id to build that decoder's own model id (task_b_d3_pymatching). It's a small, single-purpose string transform used wherever the code needs to go from "column name" to "human-readable decoder name.""""
     return column.removesuffix("_prediction")
 
-
+# Custom error type so "bad input table" is distinguishable from other
+# ValueErrors when caught, instead of using generic ValueError everywhere.
 class InputContractError(ValueError):
     """Raised when an ML input table does not match its contract."""
 
 
+'''This function will read one file's raw bytes from wherever the lake lives.
+a local folder (dev/testing) or MinIO/S3 (real deployment). try/finally always closes the network 
+connection even if read() fails.'''
 def read_lake_bytes(settings: Settings, object_name: str) -> bytes:
     """This function reads one file from the lake (MinIO or a local folder)."""
     if settings.lake_backend == "local":
@@ -148,27 +172,28 @@ def validate_syndrome_table(table: pa.Table) -> None:
     16 binary bits per row, 4 rounds and 4 checks, positive weights, and that
     each row's split matches its fault rate.
     """
-    errors: list[str] = []
+    errors: list[str] = [] #The errors that are encountered are collected as a list instead of stopping the execution whenever there is a problem faced. This way the error msg will report several issues
 
-    actual = [(f.name, f.type) for f in table.schema.remove_metadata()]
-    expected = [(f.name, f.type) for f in SYNDROME_INPUT_SCHEMA]
-    if actual != expected:
-        raise InputContractError(f"ml_syndrome_decoder_example: schema {actual} != contract {expected}")
+    #Compares the table's actual column names+types against SYNDROME_INPUT_SCHEMA.
+    actual = [(f.name, f.type) for f in table.schema.remove_metadata()] #this is the actual  column names
+    expected = [(f.name, f.type) for f in SYNDROME_INPUT_SCHEMA] #this is the expected column names
+    if actual != expected: #if it does not match 
+        raise InputContractError(f"ml_syndrome_decoder_example: schema {actual} != contract {expected}") #fatal error 
 
-    for name in table.column_names:
-        if table[name].null_count:
-            errors.append(f"{name} has {table[name].null_count} null values")
+    for name in table.column_names: #this statement checks every columns for nulls -> as pyarrow won't stop a null from getting in -> manually loop in order to check for null counts
+        if table[name].null_count: 
+            errors.append(f"{name} has {table[name].null_count} null values") #appending the errors in case of null 
 
-    ids = table["example_id"].to_pylist()
+    ids = table["example_id"].to_pylist() 
     if len(set(ids)) != len(ids):
         errors.append(f"example_id is not unique ({len(ids) - len(set(ids))} duplicates)")
 
-    splits = table["data_split"].to_pylist()
+    splits = table["data_split"].to_pylist() #this checks the split: train or test or validation. if there is missing rows for either one of the splits, then it will skip entirely a pipeline stage. 
     for split in MODEL_SPLITS:
-        if split not in splits:
-            errors.append(f"split {split!r} is empty")
+        if split not in splits: 
+            errors.append(f"split {split!r} is empty") #errors logged in whenever one of the above mentioned split is missing
 
-    rows = zip(
+    rows = zip( # Zips together the columns needed to check each row individually.
         ids,
         table["syndrome_bits"].to_pylist(),
         table["round_count"].to_pylist(),
@@ -182,11 +207,11 @@ def validate_syndrome_table(table: pa.Table) -> None:
             syndrome_model_input(bits)
         except (TypeError, ValueError) as exc:
             errors.append(f"{example_id}: {exc}")
-        if rounds != 4 or checks != 4:
+        if rounds != 4 or checks != 4: #this checks if every row has 4 X4 = 16 bits
             errors.append(f"{example_id}: round_count/check_count must be 4/4")
-        if weight is None or weight <= 0:
+        if weight is None or weight <= 0: # Weight (shot count) must be a real positive number, never zero/negative/missing.
             errors.append(f"{example_id}: sample_weight must be positive")
-        if rate is not None and split != syndrome_data_split(rate):
+        if rate is not None and split != syndrome_data_split(rate): # Recomputes which split this fault rate SHOULD be in, and checks the row's stored split agrees — catches a mislabeled row.
             errors.append(f"{example_id}: data_split {split!r} does not match fault rate {rate}")
 
     _raise_if_errors("ml_syndrome_decoder_example", errors)
@@ -651,6 +676,161 @@ def run_task_b(table: pa.Table) -> TaskResult:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Task C: bounded raw-detector prototype (part-2-ai-ml.md Task C, rubric #8)
+# ---------------------------------------------------------------------------
+
+TASK_C = "task_c_raw_detector"
+MLP_MODEL_ID = "task_c_raw_detector_mlp"
+
+# The fixed, bounded subset every team uses: distance 3 only, first 12,500
+# shots of each of the four distance-three experiments.
+RAW_DETECTOR_DISTANCE = 3
+RAW_DETECTOR_SHOT_LIMIT = 12_500
+RAW_DETECTOR_BIT_COUNT = GOOGLE_DETECTOR_COUNTS[RAW_DETECTOR_DISTANCE]  # 200
+
+RAW_BIT_FEATURE_ORDER = [f"detector_bit_{i}" for i in range(RAW_DETECTOR_BIT_COUNT)]
+
+# Small, fixed architecture -- this is a pipeline-consumer check, not an
+# architecture search (part-2-ai-ml.md: "You are not required to design or
+# research a more complex model").
+MLP_HIDDEN_LAYER_SIZES = (32,)
+MLP_MAX_ITER = 300
+
+
+def unpack_detector_matrix(detector_bits_column: list[bytes]) -> np.ndarray:
+    """Unpack one BYTEA-per-row detector_bits column into a (rows, 200) 0/1 matrix.
+
+    Same bit convention as ml.unpack_little_endian_bits and the Gold design
+    doc's Section 6.5 (numpy.unpackbits(..., bitorder="little")): little-endian
+    within each byte, sequential across bytes. Distance 3 has exactly 200 bits
+    in exactly 25 bytes (200 = 25 * 8), so there is no padding to drop here --
+    the slice below is defensive, not load-bearing for this distance.
+    """
+    if not detector_bits_column:
+        return np.zeros((0, RAW_DETECTOR_BIT_COUNT), dtype=np.float64)
+    raw = np.frombuffer(b"".join(detector_bits_column), dtype=np.uint8)
+    raw = raw.reshape(len(detector_bits_column), -1)
+    bits = np.unpackbits(raw, axis=1, bitorder="little")
+    return bits[:, :RAW_DETECTOR_BIT_COUNT].astype(np.float64)
+
+
+def raw_detector_splits(table: pa.Table) -> dict[str, SplitData]:
+    """Build train/validation/test arrays for Task C's fixed subset.
+
+    Filters to distance == 3 AND shot_index < 12_500 first, then uses the
+    supplied data_split column unchanged (already verified against
+    google_data_split by validate_google_table).
+    """
+    subset = table.filter(
+        pc.and_(
+            pc.equal(table["distance"], RAW_DETECTOR_DISTANCE),
+            pc.less(table["shot_index"], RAW_DETECTOR_SHOT_LIMIT),
+        )
+    )
+    grouped: dict[str, dict[str, list]] = {
+        split: {"bits": [], "y": [], "example_id": []} for split in MODEL_SPLITS
+    }
+    columns = subset.select(
+        ["example_id", "detector_bits", "actual_observable_flip", "data_split"]
+    ).to_pylist()
+    for row in columns:
+        group = grouped[row["data_split"]]
+        group["bits"].append(bytes(row["detector_bits"]))
+        group["y"].append(bool(row["actual_observable_flip"]))
+        group["example_id"].append(row["example_id"])
+
+    return {
+        split: SplitData(
+            X=unpack_detector_matrix(group["bits"]),
+            y=np.array(group["y"], dtype=bool),
+            weight=np.ones(len(group["y"]), dtype=np.int64),
+            example_id=group["example_id"],
+        )
+        for split, group in grouped.items()
+    }
+
+
+def run_task_c(table: pa.Table) -> TaskResult:
+    """Run Task C: one small MLP on unpacked raw detector bits.
+
+    Fixed subset: distance == 3 AND shot_index < 12_500, across the four
+    distance-three experiments. Threshold is chosen on validation only, same
+    discipline as Tasks A and B; metrics are computed on test only. No
+    baseline is required for this task (part-2-ai-ml.md).
+    """
+    validate_google_table(table)
+    splits = raw_detector_splits(table)
+    train, validation, test = splits["train"], splits["validation"], splits["test"]
+    result = TaskResult()
+
+    mlp = MLPClassifier(
+        hidden_layer_sizes=MLP_HIDDEN_LAYER_SIZES,
+        max_iter=MLP_MAX_ITER,
+        random_state=RANDOM_SEED,
+    )
+    started = time.perf_counter()
+    mlp.fit(train.X, train.y)
+    train_seconds = time.perf_counter() - started
+
+    flip_column = list(mlp.classes_).index(True)
+    threshold, validation_rate = choose_threshold(
+        validation, mlp.predict_proba(validation.X)[:, flip_column]
+    )
+
+    model_metrics: dict[str, dict] = {}
+    for split in MODEL_SPLITS:
+        data = splits[split]
+        started = time.perf_counter()
+        probability = mlp.predict_proba(data.X)[:, flip_column]
+        prediction = probability >= threshold
+        seconds = time.perf_counter() - started
+        result.predictions.append(
+            prediction_table(TASK_C, MLP_MODEL_ID, split, data, prediction, probability)
+        )
+        if split == "test":
+            model_metrics[MLP_MODEL_ID] = {
+                **evaluate(data, prediction, probability),
+                "training_seconds": train_seconds,
+                "prediction_seconds": seconds,
+            }
+
+    result.metrics = {
+        "evaluated_split": "test",
+        "test_shots": len(test.example_id),
+        "flip_share": {split: weighted_error_share(splits[split]) for split in MODEL_SPLITS},
+        "models": model_metrics,
+    }
+    result.models = {MLP_MODEL_ID: mlp}
+    result.run_info = {
+        "input_table": GOOGLE_ML_PATH,
+        "target": "actual_observable_flip",
+        "feature_helper": "quantum_lake_student.stages.train.unpack_detector_matrix "
+        "(numpy.unpackbits, bitorder='little'; no course-supplied helper covers this task)",
+        "feature_order": RAW_BIT_FEATURE_ORDER,
+        "subset_filter": f"distance == {RAW_DETECTOR_DISTANCE} AND shot_index < {RAW_DETECTOR_SHOT_LIMIT}",
+        "split_rule": "data_split column from Part I (google_data_split), same rule as Task B, "
+        "restricted to the fixed subset above",
+        "split_rows": {split: len(splits[split].example_id) for split in MODEL_SPLITS},
+        "model": {
+            "class": "sklearn.neural_network.MLPClassifier",
+            "params": {
+                "hidden_layer_sizes": MLP_HIDDEN_LAYER_SIZES,
+                "max_iter": MLP_MAX_ITER,
+                "random_state": RANDOM_SEED,
+            },
+            "n_iter": int(mlp.n_iter_),
+        },
+        "threshold": {
+            "value": threshold,
+            "chosen_on": "validation",
+            "rule": "lowest logical-error rate over 0.01..0.99, tie -> closest to 0.5",
+            "validation_logical_error_rate": validation_rate,
+        },
+    }
+    return result
+
+
 def dependency_versions() -> dict[str, str]:
     """This function returns the installed versions of the libraries that affect the results."""
     versions = {"python": platform.python_version()}
@@ -826,6 +1006,55 @@ decoder votes plus one noise summary, and it gives a probability.
 """
 
 
+def task_c_report(task_c: TaskResult) -> str:
+    """Write the Task C section of report.md from this run's numbers."""
+    metrics, info = task_c.metrics, task_c.run_info
+    m = metrics["models"][MLP_MODEL_ID]
+    share = metrics["flip_share"]
+    threshold = info["threshold"]
+    return f"""## Task C: bounded raw-detector prototype
+
+**Input and target.** `{info['input_table']}`, filtered to `{info['subset_filter']}`
+({sum(info['split_rows'].values()):,} rows across the four distance-three experiments).
+Each row's input is its own 200 raw detector bits, unpacked bit-for-bit from the
+packed `detector_bits` column (little-endian within each byte, matching how Part I
+stored them); the target is `actual_observable_flip`, the same target as Task B.
+
+**Splits.** The supplied shot-based `data_split` is used unchanged, restricted to
+this subset:
+
+| Split | Rows | Flip share |
+| --- | ---: | ---: |
+| train | {info['split_rows']['train']:,} | {share['train']:.1%} |
+| validation | {info['split_rows']['validation']:,} | {share['validation']:.1%} |
+| test | {info['split_rows']['test']:,} | {share['test']:.1%} |
+
+**Model.** A small multilayer perceptron
+(`hidden_layer_sizes={info['model']['params']['hidden_layer_sizes']}`) trained
+directly on the 200 raw bits, with no feature engineering. This is a
+pipeline-consumer check, not an architecture search: the point is that the
+prepared data can feed a model expecting raw per-detector inputs, not that it
+beats Task B's combined decoder. The decision threshold ({threshold['value']})
+was chosen on validation only ({threshold['rule']}).
+
+**Test results:**
+
+| Model | Logical-error rate | Balanced accuracy | Brier score | Train s | Predict s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `{MLP_MODEL_ID}` | {_fmt(m['logical_error_rate'])} | {_fmt(m['balanced_accuracy'])} | {_fmt(m['brier_score'])} | {m['training_seconds']:.4f} | {m['prediction_seconds']:.4f} |
+
+**What the flat 200-bit vector hides.** Each bit's position in the vector is
+arbitrary to the model: it has no notion of which detector is physically
+adjacent to which other detector, or which QEC round a bit belongs to. The real
+error signal in this data is spatial (neighbouring detectors firing together
+marks a local error) and temporal (a detector firing in consecutive rounds means
+something different from firing once); flattening to 200 independent inputs
+discards both before the MLP ever sees the data. This caps what a small MLP on
+this representation can learn, regardless of how it is tuned -- which is exactly
+why the assignment treats this as a bounded prototype, not a competition.
+"""
+
+
 def write_report(path: Path, tasks: dict[str, TaskResult]) -> None:
     """This function writes report.md with a section for every task that ran."""
     sections = [
@@ -836,6 +1065,8 @@ def write_report(path: Path, tasks: dict[str, TaskResult]) -> None:
         sections.append(task_a_report(tasks[TASK_A]))
     if TASK_B in tasks:
         sections.append(task_b_report(tasks[TASK_B]))
+    if TASK_C in tasks:
+        sections.append(task_c_report(tasks[TASK_C]))
     path.write_text("\n".join(sections))
 
 
@@ -871,7 +1102,11 @@ def run(model_run_id: str | None = None, results_dir: Path = RESULTS_PART2) -> S
     syndrome_table = parquet_table(syndrome_bytes)
     google_table = parquet_table(google_bytes)
 
-    tasks = {TASK_A: run_task_a(syndrome_table), TASK_B: run_task_b(google_table)}
+    tasks = {
+        TASK_A: run_task_a(syndrome_table),
+        TASK_B: run_task_b(google_table),
+        TASK_C: run_task_c(google_table),
+    }
 
     result.input_count = syndrome_table.num_rows + google_table.num_rows
     result.output_count = sum(piece.num_rows for task in tasks.values() for piece in task.predictions)

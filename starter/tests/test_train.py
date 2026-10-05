@@ -1,4 +1,4 @@
-"""Tests for the Part II training stage (Tasks A and B).
+"""Tests for the Part II training stage (Tasks A, B and C).
 
 They use small hand-made tables, so no database, MinIO or real data is needed.
 """
@@ -242,6 +242,11 @@ def test_run_reads_only_the_ml_files_and_writes_results(monkeypatch, tmp_path) -
     for example_id, split in zip(predictions["example_id"].to_pylist(), predictions["split"].to_pylist()):
         assert split == expected_split[example_id]
     assert tasks.count(train.TASK_B) == 6 * make_google_table().num_rows
+    # Task C's fixed subset is distance == 3 AND shot_index < 12_500; the toy
+    # fixture's distance-3 shots are all 0..59, so every one of them qualifies
+    # and gets exactly one model's prediction (the MLP, no baseline).
+    distance_three_rows = sum(1 for r in make_google_table().to_pylist() if r["distance"] == 3)
+    assert tasks.count(train.TASK_C) == distance_three_rows
 
     run_record = json.loads((tmp_path / "run.json").read_text())
     assert run_record["input_hashes"][train.GOOGLE_ML_PATH] == train.sha256_hex(lake[train.GOOGLE_ML_PATH])
@@ -250,20 +255,27 @@ def test_run_reads_only_the_ml_files_and_writes_results(monkeypatch, tmp_path) -
     assert run_record["random_seed"] == train.RANDOM_SEED
     assert run_record["task_a_syndrome"]["feature_order"] == train.SYNDROME_FEATURE_ORDER
     assert run_record["task_a_syndrome"]["threshold"]["chosen_on"] == "validation"
+    assert run_record["task_c_raw_detector"]["feature_order"] == train.RAW_BIT_FEATURE_ORDER
+    assert run_record["task_c_raw_detector"]["threshold"]["chosen_on"] == "validation"
     assert set(run_record["model_files"]) == {
         f"models/{train.PRIOR_MODEL_ID}.pkl", f"models/{train.LOGISTIC_MODEL_ID}.pkl",
+        f"models/{train.MLP_MODEL_ID}.pkl",
         *(f"models/task_b_d{d}_{name}.pkl" for d in (3, 5) for name in ("prior", "combined_logistic")),
     }
 
     all_metrics = json.loads((tmp_path / "metrics.json").read_text())
-    blocks = [all_metrics["task_a_syndrome"], *all_metrics["task_b_google"]["distances"].values()]
+    blocks = [
+        all_metrics["task_a_syndrome"],
+        all_metrics["task_c_raw_detector"],
+        *all_metrics["task_b_google"]["distances"].values(),
+    ]
     for block in blocks:
         for m in block["models"].values():
             assert {"logical_error_rate", "balanced_accuracy", "brier_score",
                     "training_seconds", "prediction_seconds"} <= set(m)
     report = (tmp_path / "report.md").read_text()
     assert report.startswith("# Part II report")
-    assert "## Task A" in report and "## Task B" in report
+    assert "## Task A" in report and "## Task B" in report and "## Task C" in report
 
 
 DECODERS = train.GOOGLE_META_PREDICTION_COLUMNS
@@ -428,5 +440,91 @@ def test_decoder_overlap_matches_hand_calculation() -> None:
 
 def test_task_b_is_repeatable() -> None:
     first, second = train.run_task_b(make_google_table()), train.run_task_b(make_google_table())
+    assert first.predictions == second.predictions
+    assert first.run_info == second.run_info
+
+
+# ---------------------------------------------------------------------------
+# Task C: bounded raw-detector prototype
+# ---------------------------------------------------------------------------
+
+
+def test_raw_detector_subset_keeps_only_distance_three_below_the_shot_limit() -> None:
+    """This test checks that Task C's filter keeps distance 3, shot_index < 12_500 only."""
+    limit = train.RAW_DETECTOR_SHOT_LIMIT
+    rows = [
+        _google_row(3, 10),            # kept
+        _google_row(3, limit),         # dropped: at the limit, not below it
+        _google_row(3, limit + 1),     # dropped: over the limit
+        _google_row(5, 10),            # dropped: wrong distance
+    ]
+    table = make_google_table(rows=rows)
+    splits = train.raw_detector_splits(table)
+    ids = [i for data in splits.values() for i in data.example_id]
+    assert ids == [rows[0]["example_id"]]
+
+
+def test_unpack_detector_matrix_matches_the_single_row_helper() -> None:
+    """This test checks that the vectorized Task C unpacker agrees, bit for
+    bit, with the scalar course helper used for Task B's contract checks."""
+    packed = [_packed([0, 9, 199], 200), _packed([], 200)]
+    matrix = train.unpack_detector_matrix(packed)
+    for row, bits in zip(matrix, packed):
+        assert tuple(int(v) for v in row) == unpack_little_endian_bits(bits, 200)
+    assert matrix.shape == (2, 200)
+
+
+def test_unpack_detector_matrix_handles_an_empty_column() -> None:
+    assert train.unpack_detector_matrix([]).shape == (0, train.RAW_DETECTOR_BIT_COUNT)
+
+
+def test_raw_detector_rows_stay_in_their_supplied_split() -> None:
+    """This test checks that Task C's split matches google_data_split(shot_index)
+    for every row in the fixed subset, the same rule as Task B."""
+    table = make_google_table()  # distances 3 and 5, shots 0..59
+    splits = train.raw_detector_splits(table)
+    for split, data in splits.items():
+        for example_id in data.example_id:
+            shot_index = int(example_id.rsplit(":", 1)[1])
+            assert train.google_data_split(shot_index) == split
+    assert all("_d3_" in example_id for data in splits.values() for example_id in data.example_id)
+
+
+def test_raw_detector_features_are_200_bits_wide() -> None:
+    splits = train.raw_detector_splits(make_google_table())
+    assert len(train.RAW_BIT_FEATURE_ORDER) == 200
+    for data in splits.values():
+        assert data.X.shape[0] == len(data.example_id)
+        if data.X.shape[0]:
+            assert data.X.shape[1] == 200
+            assert set(np.unique(data.X)) <= {0.0, 1.0}
+
+
+def test_task_c_validates_its_input_table() -> None:
+    """This test checks that run_task_c runs the same contract check as
+    Task B before touching the data, so a broken Google table never reaches the MLP."""
+    with pytest.raises(train.InputContractError, match="detector_event_count does not equal"):
+        train.run_task_c(_changed(detector_event_count=99))
+
+
+def test_task_c_test_labels_do_not_influence_fitting_or_threshold() -> None:
+    """This test checks that flipping test-split labels never changes the
+    fitted MLP or the chosen threshold, the same discipline as Tasks A and B."""
+    rows = make_google_table().to_pylist()
+    flipped = [{**r, "actual_observable_flip": not r["actual_observable_flip"]} if r["data_split"] == "test" else r
+               for r in rows]
+    original = train.run_task_c(make_google_table(rows=rows))
+    changed = train.run_task_c(make_google_table(rows=flipped))
+    keys = ("model", "threshold")
+    assert {k: original.run_info[k] for k in keys} == {k: changed.run_info[k] for k in keys}
+    assert original.metrics["models"] != changed.metrics["models"]
+
+
+def test_task_c_is_repeatable() -> None:
+    """This test checks that two fresh runs on the same input give the same
+    predictions and run_info. MLPClassifier with a fixed random_state is
+    deterministic for a given BLAS backend; a flake here points at
+    multi-threaded BLAS non-determinism on the machine, not at the pipeline."""
+    first, second = train.run_task_c(make_google_table()), train.run_task_c(make_google_table())
     assert first.predictions == second.predictions
     assert first.run_info == second.run_info
