@@ -1,7 +1,6 @@
 # Part I design report — QEC data pipeline
 
-This is the single Part I design report requested in `assignment/brief.md`
-(deliverable 6). It covers source discovery, the architecture, the Gold
+This is the single Part I design report requested in `assignment/brief.md`. It covers source discovery, the architecture, the Gold
 design, the important decisions, the rejected relationship, quality findings,
 the detector-storage measurement, the three analyses and the two example
 traces. The answers to every "Questions to investigate" item in
@@ -39,10 +38,10 @@ traces. The answers to every "Questions to investigate" item in
 We use the course architecture without deviations:
 
 ```text
-bronze  the three supplied archives, unchanged (read-only)
-  -> silver  six source-specific Parquet tables 
-  -> gold    our "designed PostgreSQL model"
-  -> ml      two fixed Parquet tables for Part II 
+bronze:  the three supplied archives, read-only
+silver:  six source-specific Parquet tables 
+gold:    our "designed PostgreSQL model"
+ml:      two fixed Parquet tables for Part II 
 
 results/part1  data_issues, run.json, row_counts.json, source_trace, trace_examples, analysis/
 ```
@@ -60,7 +59,7 @@ if any of the stages fail:
 
 Each layer reads only the one before it. The ML export never reads Bronze or
 Silver, and a test checks this. A
-full run takes about 45 seconds and no step depends on running notebook cells.
+full run takes about 45 seconds without running any notebook cells (The notebook was just used for the first discovery stage).
 
 ---
 
@@ -102,7 +101,10 @@ Findings that shaped the design:
 | `qec_en_n5` | `q[5]`, `c[5]` | 10 | 5 | 0 | 0 |
 | `qec_sm_n5` | `q[3]`, `a[2]`, `c[3]`, `syn[2]` | 4 | 5 | 2 | 3 |
 
-Source and transpiled variants give the same numbers.
+
+### Discovery Notebook
+
+We used a Jupyter notebook (discovery_bronze.ipynb) to inspect the three Bronze archives before writing the stage modules: listing archive members, checking the syndrome CSV shapes and quantity totals, checking .b8 file sizes and .01 line counts against properties.yml, comparing d=3 and d=5 experiments, etc. The findings went into the decision log. Once the logic worked, we moved it into the working files located `stages/, so the pipeline never runs in the notbook cells.
 
 ---
 
@@ -141,7 +143,7 @@ Result: 3 objects read, 3 accepted, 0 rejected.
 
 All six tables are written with explicit Arrow schemas that match
 `silver-tables.md`, and a test checks each schema. No table joins data from
-more than one source.
+more than one source, which was mentioned in the project specs.
 
 ### Rules and what happens when they fail
 
@@ -575,8 +577,7 @@ written directly. On later runs, each source's old rows are filtered out and
 its new rows are appended. The rows, schema and order are identical; we
 checked this with `pyarrow` `Table.equals`. Only the byte-level Parquet
 encoding differs between the two write paths. Both encodings are
-deterministic: we repeated a first-write run and got `20c5ca7b…` again, and
-every later run gives `a1184a0e…`.
+deterministic.
 
 **Run records.**
 
@@ -589,9 +590,8 @@ every later run gives `a1184a0e…`.
 
 ## 12. Tests
 
-`make test` runs 177 tests (all passing on 2026-10-04, after the clean run in
-Section 11). Database tests use a
-throwaway schema, never the real `gold` schema.
+`make test` runs 177 tests (all passing). For testing the golf stager, the dwhyatabase tests use a
+throwaway schema, not touching the real `gold` schema.
 
 | Area | Test files | Covers |
 | --- | --- | --- |
@@ -622,8 +622,6 @@ throwaway schema, never the real `gold` schema.
 - `circuit_sweep_bits` from `properties.yml` is used in the length checks but
   is not stored as a column, because the Silver contract does not require it.
 - The detector bits cannot be filtered per detector in SQL (Section 6.5).
-- `code_revision` is the last commit, so a run from a modified working tree
-  reports the last commit.
 - A transient failure in one source blocks the Gold commit for all three.
   This is the cost of the all-or-nothing guarantee.
 - The two ML Parquet files are written one after the other, not as one
@@ -634,6 +632,6 @@ throwaway schema, never the real `gold` schema.
 ---
 
 ## Document for Questions to Investigate
-[docs/decision-log.md](../docs/decision-log.md) answers each "Questions to
+As mentioned before, [docs/decision-log.md](../docs/decision-log.md) answers each "Questions to
 investigate" item from `assignment/data-sources.md`, one by one, and points to
 the code, test or query that proves each answer.

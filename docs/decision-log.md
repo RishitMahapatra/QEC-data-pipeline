@@ -1,8 +1,7 @@
 # Part I — discovery decision log
 
 This is the discovery decision log that `assignment/getting-started.md` asks
-for ("create a discovery notebook and a plain Markdown decision log"). It
-answers each "Questions to investigate" item in `assignment/data-sources.md`.
+for, which answers each "questions to investigate" from `assignment/data-sources.md`.
 Each answer gives the conclusion and points to the code, test or query that
 proves it, so the answer can be checked rather than just believed. The design
 built on these findings is explained in the Part I report,
@@ -15,7 +14,7 @@ built on these findings is explained in the Part I report,
 Questions from `assignment/data-sources.md`:
 
 ### Does the documented schema match the actual header? — *Stage: Bronze (done)*
-Yes — enforced by code, not just sampled. `register_sources.py`'s
+Yes, enforced by code, not just sampled. `register_sources.py`'s
 `_check_syndrome_structure` reads the header line of all 7 CSVs and raises
 `BronzeError` on any mismatch against `labels,syndromes,quantity`. This runs
 every time the Bronze stage runs, so it can't silently regress.

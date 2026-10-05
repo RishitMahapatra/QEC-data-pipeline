@@ -19,7 +19,5 @@ datasets/
 .ipynb_checkpoints/
 starter/.Trash-0/
 starter/01_discovery.ipynb
-**/discovery_bronze.ipynb
-**/discovery1.ipynb
 TASK_SPLIT.md
 
