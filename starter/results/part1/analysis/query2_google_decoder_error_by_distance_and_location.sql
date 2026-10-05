@@ -77,7 +77,8 @@ JOIN majority_baseline b ON b.experiment_id = d.experiment_id
 WINDOW per_distance AS (PARTITION BY d.distance, d.decoder_name)
 ORDER BY d.distance, d.center_row, d.center_col, rank_at_location, d.decoder_name;
 
--- Result (run 2026-09-30, real Gold load of the supplied release):
+-- Result (clean run 2026-10-04, run_id f4f249f9-ef6e-4f63-9b74-dcd61520da35;
+-- identical to this query's _result.csv, rewritten by every `make run`):
 --
 -- distance | center_row | center_col | decoder_name               | shots | logical_errors | logical_error_rate | rank_at_location | pooled_rate_for_distance | majority_baseline_error_rate
 -- 3        | 3          | 5          | tensor_network_contraction | 50000 | 20114          | 0.4023             | 1                | 0.3970                   | 0.4903
