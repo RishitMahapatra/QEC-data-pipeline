@@ -38,10 +38,8 @@ JOIN gold_qasmbench_conditional_correction cc ON cc.circuit_id = c.circuit_id
 WHERE c.benchmark_name = 'qec_sm_n5'
 ORDER BY c.variant, sc.ancilla_qubit, cc.condition_value;
 
--- Result (run 2026-09-29, real QASMBench Bronze archive, via
--- prepare_qasmbench_silver + load_postgres._load_qasmbench, against the
--- real `gold` schema - unchanged from the earlier run before the schema
--- and Silver-to-Gold reconciliation were moved to their current form):
+-- Result (clean run 2026-10-04, run_id f4f249f9-ef6e-4f63-9b74-dcd61520da35;
+-- identical to this query's _result.csv, rewritten by every `make run`):
 --
 -- circuit_id            | variant    | ancilla_qubit | data_qubits | syndrome_bit | syndrome_register_size | condition_value | gate | target_qubit
 -- qec_sm_n5:source      | source     | a[0]          | {q[0],q[1]} | syn[0]       | 2                      | 1               | x    | q[0]

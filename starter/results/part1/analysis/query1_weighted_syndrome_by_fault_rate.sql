@@ -17,7 +17,8 @@ JOIN gold_syndrome_experiment e ON e.experiment_id = o.experiment_id
 GROUP BY e.physical_fault_rate, o.logical_error_label
 ORDER BY e.physical_fault_rate, o.logical_error_label;
 
--- Result (run 2026-09-27, run_id 97d3061b-2023-4d6f-ab3f-af4255d0c003):
+-- Result (clean run 2026-10-04, run_id f4f249f9-ef6e-4f63-9b74-dcd61520da35;
+-- identical to this query's _result.csv, rewritten by every `make run`):
 --
 -- physical_fault_rate | logical_error_label | weighted_count
 -- 0.00001             | false                | 9997660
@@ -35,9 +36,10 @@ ORDER BY e.physical_fault_rate, o.logical_error_label;
 -- 0.01                | false                | 8134726
 -- 0.01                | true                 | 1865274
 --
--- Interpretation: each fault-rate file sums to ~10M weighted observations,
--- matching the "~10M weighted shots per file" from the assignment brief. As
--- physical_fault_rate increases, the weighted share of logical_error_label =
--- true rises steadily (from ~0.02% at 0.00001 to ~18.6% at 0.01), consistent
--- with more physical noise producing more logical errors. This is an
--- association observed in the data, not a claim of a specific causal model.
+-- Interpretation: each fault-rate file sums to exactly 10,000,000 weighted
+-- observations, matching the "~10M weighted shots per file" from the
+-- assignment brief. As physical_fault_rate increases, the weighted share of
+-- logical_error_label = true rises steadily, from 0.02% at 0.00001 to 18.7%
+-- at 0.01: roughly in proportion to the fault rate at the lower rates, and
+-- more slowly at the highest rates. This is an association observed in the
+-- data, not a causal claim.
