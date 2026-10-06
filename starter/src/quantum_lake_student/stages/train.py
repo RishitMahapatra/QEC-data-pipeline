@@ -131,7 +131,7 @@ def task_b_model_id(distance: int, name: str) -> str:
 
 def decoder_name(column: str) -> str:
     """This function turns 'pymatching_prediction' into 'pymatching'.
-    The four supplied decoder columns in the input table are named like pymatching_prediction, union_find_prediction, etc. (ending in _prediction). This strips that suffix to get the plain decoder name (pymatching), which is then fed into task_b_model_id to build that decoder's own model id (task_b_d3_pymatching). It's a small, single-purpose string transform used wherever the code needs to go from "column name" to "human-readable decoder name.""""
+    The four supplied decoder columns in the input table are named like pymatching_prediction, union_find_prediction, etc. (ending in _prediction). This strips that suffix to get the plain decoder name (pymatching), which is then fed into task_b_model_id to build that decoder's own model id (task_b_d3_pymatching). It's a small, single-purpose string transform used wherever the code needs to go from "column name" to "human-readable decoder name." """
     return column.removesuffix("_prediction")
 
 # Custom error type so "bad input table" is distinguishable from other
@@ -1074,6 +1074,9 @@ def write_outputs(results_dir: Path, tasks: dict[str, TaskResult], run_record: d
     """This function writes the model files, predictions.parquet, metrics.json, run.json and report.md."""
     models_dir = results_dir / MODELS_DIR_NAME
     models_dir.mkdir(parents=True, exist_ok=True)
+    # Remove model files from earlier runs, so a renamed or dropped model leaves nothing behind.
+    for old_model in models_dir.glob("*.pkl"):
+        old_model.unlink()
 
     model_hashes = {}
     for task in tasks.values():

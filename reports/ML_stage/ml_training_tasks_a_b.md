@@ -130,6 +130,12 @@ row must have `ceil(detector_count / 8)` bytes with zero padding bits,
 count must be 200 for d=3 and 600 for d=5, and `(experiment_id, shot_index)`
 must be unique.
 
+The supplied data has no padding bits at all: 200 and 600 are both multiples
+of 8, so every packed row fills its 25 or 75 bytes exactly and the padding
+check can never fail on it. The check is still there because the contract
+names it, and it is tested with a made-up count of 12 detectors (2 bytes, 4
+padding bits).
+
 **11. Supplied decoders are scored, not run.** Their predictions are read
 from the same row as the label, so all models are compared on identical test
 shots (a test checks this). They only give yes/no answers, so their Brier
@@ -169,10 +175,12 @@ The prior has a Brier score of 0.250 and the combined model 0.235 (d=3) and
 - All four decoders beat the prior, but they are still wrong on about 40% of
   shots. Each shot covers 25 rounds, so the final logical outcome is close
   to 50/50.
-- The decoders make different mistakes more often than the same ones. They
-  disagree on 55% of shots (d=3) and 65% (d=5), and a pair of decoders shares
-  between 33% and 53% of its mistakes. Tensor network and PyMatching overlap
-  the least.
+- In most pairs, the decoders make different mistakes more often than the
+  same ones. They disagree on 55% of shots (d=3) and 65% (d=5). At d=5 every
+  pair shares less than half of its mistakes (33% to 49%). At d=3 that holds
+  for four of the six pairs (36% to 48%); the other two, belief matching with
+  tensor network and correlated matching with PyMatching, share slightly more
+  than half (53%). Tensor network and PyMatching overlap the least.
 - The combined model ties the best decoder (tensor network) but does not beat
   it. At d=3 it fixes 6.6% of the shots tensor network gets wrong and breaks
   6.7% it got right; at d=5 it fixes 5.3% and breaks 5.6%. The 14.4% / 10.9%
@@ -203,17 +211,18 @@ The prior has a Brier score of 0.250 and the combined model 0.235 (d=3) and
 | Error rate, balanced accuracy, Brier, training and prediction time | `metrics.json`, `report.md` |
 | Fixed seed and versions, one command, saved models | Decision 5, `run.json`, `models/` |
 | `predictions.parquet` with `example_id` | Decision 6 |
-| Tests for columns/types, splits, weights, bit order, event counts, repeatability, metrics | 35 tests in `test_train.py` |
+| Tests for columns/types, splits, weights, bit order, event counts, padding, repeatability, metrics | 38 tests for Tasks A and B in `test_train.py` |
 
 All tests pass:
 `docker compose exec workspace pytest tests/test_train.py -v`
 
 ## Limitations
 
-- **Library versions are not fully pinned.** `numpy` and `scipy` are not
-  pinned in `docker/requirements.txt` or `pyproject.toml`; the container has
-  numpy 2.5.3 while `uv.lock` lists 2.5.1. `run.json` records the versions
-  that actually ran, but they should be pinned.
+- **`uv.lock` is behind the pins.** `numpy==2.5.3` and `scipy==1.18.1` are
+  now pinned in `docker/requirements.txt` and `pyproject.toml`, matching the
+  container. `uv.lock` still lists numpy 2.5.1 and scipy 1.18.0 and has to be
+  regenerated with `uv lock`. The container installs from `requirements.txt`,
+  so results are not affected.
 - **`run.json` records the last commit, not uncommitted changes.** The code
   has to be committed before the final run so the revision matches.
 - **Tracing order.** `make run` (Part I, including `trace_examples`) runs

@@ -371,6 +371,38 @@ def test_wrong_google_type_is_rejected() -> None:
         train.validate_google_table(table)
 
 
+def test_zero_padding_bits_are_accepted(monkeypatch) -> None:
+    """This test checks that a detector count that is not a multiple of 8 passes when its padding is zero."""
+    # 12 detectors -> 2 bytes, the top 4 bits of the last byte are padding
+    monkeypatch.setitem(train.GOOGLE_DETECTOR_COUNTS, 3, 12)
+    table = make_google_table()
+    assert len(table["detector_bits"][0].as_py()) == 2
+    train.validate_google_table(table)
+
+
+def test_nonzero_padding_bits_are_rejected(monkeypatch) -> None:
+    """This test checks that a set padding bit is reported."""
+    monkeypatch.setitem(train.GOOGLE_DETECTOR_COUNTS, 3, 12)
+    rows = make_google_table().to_pylist()
+    bits = bytearray(rows[1]["detector_bits"])
+    bits[-1] |= 0b1000_0000
+    rows[1]["detector_bits"] = bytes(bits)
+    with pytest.raises(train.InputContractError, match="padding bits are not zero"):
+        train.validate_google_table(make_google_table(rows=rows))
+
+
+def test_old_model_files_are_removed(tmp_path) -> None:
+    """This test checks that model files from an earlier run do not stay behind."""
+    models_dir = tmp_path / train.MODELS_DIR_NAME
+    models_dir.mkdir()
+    (models_dir / "renamed_model.pkl").write_bytes(b"old")
+    task_a = train.run_task_a(make_table())
+    train.write_outputs(tmp_path, {train.TASK_A: task_a}, {})
+    assert sorted(p.name for p in models_dir.iterdir()) == [
+        f"{train.LOGISTIC_MODEL_ID}.pkl", f"{train.PRIOR_MODEL_ID}.pkl",
+    ]
+
+
 def test_distances_are_kept_separate_and_inputs_come_from_the_helper() -> None:
     table = make_google_table()
     for distance in (3, 5):
