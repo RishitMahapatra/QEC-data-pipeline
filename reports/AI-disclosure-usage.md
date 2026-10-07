@@ -32,3 +32,18 @@
    it.
 3. We spent time discussing and understanding the reasoning rather than
    just copying conclusions.
+
+## Khushi's Version of AI usage disclosure (QASMBench - Bronze, Silver, Gold Stages)
+
+## 1. What we used AI for
+
+1. We used AI to help understand certain QASMBench concepts and data structures to map them better to the assignment requirements.
+2. We used AI for general coding assistance and reference when setting up the data processing pipelines for the Bronze and Silver stages.
+3. We used AI to help brainstorm schema designs and check SQL syntax for the Gold stage.
+4. We used AI to help structure and polish written explanations for our design decisions and reports.
+
+
+## 2. How did we use AI responsibly?
+
+1. The AI-generated output served as a template rather than a final answer. We cross-checked it against the course's own specification documents and the QASMBench schema.
+2. We spent time understanding the reasoning behind the AI's suggestions rather than blindly copying the code or conclusions.
