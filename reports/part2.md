@@ -1,5 +1,227 @@
 # PART 2 REPORT
 
+# Task A design decisions — weighted syndrome decoder
+
+## What Task A is
+
+Task A asks for a decoder that predicts `logical_error_label` from the
+simulated syndrome table, `ml/ml_syndrome_decoder_example.parquet`. The
+spec (`part-2-ai-ml.md`) fixes the scope:
+
+- The input is the **ordered 4-by-4 syndrome**: 16 binary values, round
+  first and then check, taken from the course helper
+  `syndrome_model_input`.
+- **Exactly two comparisons**: a weighted majority/prior baseline and one
+  weighted linear classifier.
+- One row is not one shot. Each of the 75,598 rows stands for `sample_weight`
+  identical simulated shots, 70 million in total, and the spec forbids
+  expanding them into individual rows.
+- The split is supplied and fixed by physical fault rate: validation is
+  `0.0005`, test is `0.005`, train is the other five files.
+- Physical weights must be used in fitting where supported and in **all**
+  reported metrics.
+
+## How we decided to implement it
+
+**Why Part II validates the table again.** Part I already checks the table
+when it exports it, but the spec says to "validate both input-table schemas
+before training". `validate_syndrome_table()` therefore checks the file from
+the consumer side: exact columns and types, no nulls, unique `example_id`,
+all three splits present, 16 binary values per row, 4 rounds and 4 checks,
+positive weights, and that each row's `data_split` matches
+`syndrome_data_split` for its fault rate. If anything fails, the run stops
+before any model is fitted.
+
+**Why logistic regression is the one linear model.** The spec allows
+exactly one weighted linear classifier and names logistic regression as an
+example. We picked it because it accepts `sample_weight`, it gives a
+probability (so a Brier score can be reported, not just yes/no metrics),
+and its 16 coefficients can be read directly as "how much does this check
+in this round push toward a logical error".
+
+**Why the weights are used everywhere and rows are never expanded.** A row
+with weight 9,987,291 has to count as that many shots, otherwise a rare
+pattern would matter as much as the most common one. Both models are fitted
+with `sample_weight`, and `evaluate()` passes the same weights to the
+logical-error rate, balanced accuracy and Brier score. A test checks that a
+row with weight 2 fits exactly like two rows with weight 1, which is the
+property that makes expanding the 70 million shots unnecessary.
+
+**Why the baseline is a weighted prior.** `DummyClassifier(strategy=
+"prior")`, fitted with the weights, learns only the weighted share of
+logical errors in train (4.3%). It always predicts "no error" and reports
+that share as its probability. Logical errors are rare, so this is already
+a strong baseline on error rate, and it gives the linear model a fair bar
+on both the yes/no metrics and the Brier score.
+
+**Why the threshold is chosen on validation by error rate.** The logistic
+regression gives a probability, so one choice remains: where to cut it into
+yes/no. `choose_threshold()` tries 0.01 to 0.99 on validation only and keeps
+the value with the lowest weighted logical-error rate, since that is the
+task's main metric. Ties go to the value closest to 0.5, so the choice is
+always the same. Test is never used for this.
+
+**Why we report a result that does not beat the baseline.** On test the
+logistic regression has a logical-error rate of 0.1041 against 0.1040 for
+the prior, with a better Brier score (0.0910 against 0.0969). The reason is
+the threshold: validation has only 1.1% errors, so the chosen threshold is
+0.93, which almost never predicts an error, while test has 10.4% errors.
+We report this as it is instead of tuning on test. The spec says a model
+that does not beat its baseline is a complete result when it is explained.
+
+**Why predictions are saved for every split.** All metrics come from test
+only, but `predictions.parquet` keeps train and validation rows as well,
+each with its `example_id`. That way any syndrome example in the ML table
+can be traced from its prediction back to Gold, Silver and Bronze.
+
+**Why the run is repeatable.** The split is fixed, nothing is shuffled, the
+default `lbfgs` solver is deterministic and `RANDOM_SEED` is fixed on top of
+that. Two runs give byte-identical predictions and model files; only the
+timings differ.
+
+## Rubric comparison (item 6 — Weighted syndrome model, 12 points)
+
+| Rubric requirement (10–12 point band) | How Task A meets it |
+| --- | --- |
+| Correct supplied partitions and physical weights | `syndrome_splits()` groups rows by the existing `data_split` column, which `validate_syndrome_table()` has already checked against `syndrome_data_split`; `sample_weight` is passed to both `.fit()` calls and to every metric in `evaluate()` |
+| Weighted prior and one weighted linear model | `DummyClassifier(strategy="prior")` and one `LogisticRegression`, both fitted on train with `sample_weight` in `run_task_a()` |
+| Required metrics and timings | Weighted logical-error rate, balanced accuracy and Brier score from `evaluate()`; `.fit()` and prediction on test are timed, stored in `metrics["models"]` |
+| Clear, data-based interpretation of imbalance and the result | `task_a_report()` states the error share of every split (4.3% / 1.1% / 10.4%), explains why the prior scores 0.5 balanced accuracy, and why a threshold chosen on validation does not carry over to test |
+
+Nothing here depends on the linear model winning — rubric item 6 grades
+the partitions, the weights, the baseline and the honesty of the
+interpretation, not the score.
+
+## Related checklist items this satisfies
+
+- "The weighted majority/prior and one weighted linear classifier run." —
+  both are fitted and scored in `run_task_a()`.
+- "Supplied partitions are used without moving examples between them." —
+  `test_rows_stay_in_their_supplied_split` and
+  `test_split_that_disagrees_with_fault_rate_is_rejected`.
+- "Physical weights are used in all Task A evaluation metrics and in fitting
+  where supported." — `test_weight_counts_like_repeated_rows`,
+  `test_prior_learns_the_weighted_error_share_of_train` and
+  `test_weighted_metrics_match_hand_calculation`.
+- "Tests cover required columns/types, split use ... weighting,
+  repeatability, and metric calculations" — also
+  `test_wrong_column_type_is_rejected`,
+  `test_test_labels_do_not_influence_fitting_or_threshold` and
+  `test_task_a_is_repeatable`.
+
+# Task B design decisions — supplied and combined Google decoders
+
+## What Task B is
+
+Task B works on the real hardware table,
+`ml/ml_google_decoder_example.parquet`, where every row is one shot. The
+spec (`part-2-ai-ml.md`) asks, for **distance three and distance five
+separately**:
+
+- a majority/prior baseline;
+- an evaluation of each of the **four supplied decoder predictions** on the
+  same test shots;
+- one simple linear combined decoder with exactly **five inputs**:
+  normalized detector-event density and the four supplied predictions;
+- any threshold chosen on validation only;
+- a short description of whether the supplied decoders make the same or
+  different mistakes, and how that affects the combined model.
+
+The target is `actual_observable_flip`. The split is supplied per shot:
+odd `shot_index` is test, even with `shot_index % 10 == 8` is validation,
+the rest is train.
+
+## How we decided to implement it
+
+**Why the two distances never share anything.** Distance 3 has 200
+detectors and four experiments (200,000 shots); distance 5 has 600
+detectors and one experiment (50,000 shots). `google_splits()` filters the
+table to one distance before anything else, and `run_task_b()` loops over
+the distances, so each one gets its own prior, its own combined model, its
+own threshold and its own metrics. No row of one distance can reach a model
+of the other.
+
+**Why the Google table gets extra checks.** On top of the shared checks,
+`validate_google_table()` verifies what the contract names for packed
+rows: `ceil(detector_count / 8)` bytes, zero padding bits,
+`detector_event_count` equal to the number of fired bits, 200 or 600
+detectors for the distance, and a unique `(experiment_id, shot_index)`. The
+supplied data has no padding at all, because 200 and 600 are both multiples
+of 8, so the padding check cannot fail on it. It is still there because the
+contract requires it, and it is tested with a made-up count of 12 detectors.
+
+**Why the supplied decoders are read, not run.** Their predictions were
+computed by the data provider and sit on the same row as the label. Scoring
+them means comparing two columns of that row, which also guarantees that
+every model is judged on identical test shots. They only give yes/no
+answers, so their Brier score and their training and prediction times are
+recorded as not applicable instead of being invented.
+
+**Why the five inputs come only from the helper.** `google_meta_model_input`
+returns the event density (fired detectors divided by all detectors) and
+the four predictions as 0/1. We use exactly that vector and build nothing
+else. Columns 1 to 4 of the input are therefore the supplied decoders'
+answers themselves, aligned with the label by construction.
+
+**Why the combined decoder is a logistic regression.** The task asks for one
+simple linear model. Logistic regression learns one coefficient per input,
+which reads as "how much to trust this decoder", and it gives a probability.
+Its threshold is chosen with the same `choose_threshold()` as Task A, on
+validation only (0.51 for distance 3, 0.55 for distance 5).
+
+**Why every shot has weight 1.** A row here is one real shot, not an
+aggregate, so there is no physical weight. Giving each row weight 1 lets
+Task B reuse the same `evaluate()` and `choose_threshold()` as Task A, so
+the metrics of the two tasks are computed by the same code.
+
+**Why overlap is measured per shot and per pair.** The spec asks whether
+the decoders make the same mistakes. `decoder_overlap()` counts, on test,
+how many of the four are wrong on each shot, how often each pair is wrong
+together, and which shots the combined model fixes or breaks compared with
+the best single decoder. In most pairs the decoders share less than half of
+their mistakes; two distance-3 pairs share slightly more (53%). All four
+are wrong together on 14.4% of distance-3 shots and 10.9% of distance-5
+shots, and no combination of their answers can fix those.
+
+**Why we report that the combination only ties the best decoder.** Tensor
+network contraction is the best supplied decoder (0.3967 at distance 3,
+0.3952 at distance 5). The combined model reaches 0.3977 at both: it fixes
+about as many shots as it breaks (6.6% against 6.7% at distance 3). The
+coefficients agree with the ranking, with the largest weight on tensor
+network and the smallest on PyMatching.
+
+## Rubric comparison (item 7 — Google combined decoder, 12 points)
+
+| Rubric requirement (10–12 point band) | How Task B meets it |
+| --- | --- |
+| Distance-three and distance-five work is separate | `google_splits(table, distance)` filters to one distance first; `run_task_b()` fits, thresholds and scores each distance on its own, and `metrics.json` has one block per distance |
+| All four supplied decoders are compared on identical test shots | Each decoder's prediction is read from the same row as the label; `test_all_task_b_models_use_identical_test_shots` checks that all six models share the same test `example_id`s |
+| The five-feature linear combined decoder is aligned correctly | Inputs come only from `google_meta_model_input`; `GOOGLE_FEATURE_ORDER` is recorded in `run.json`; one `LogisticRegression` per distance |
+| Validation-only choices and decoder-error overlap are explained honestly | Threshold from `choose_threshold()` on validation; `decoder_overlap()` feeds the overlap tables in `task_b_report()`, which states that the combined model does not beat the best single decoder |
+
+Nothing here needs the combined decoder to win — rubric item 7 grades the
+separation, the alignment, the identical test shots and the honest
+explanation of the overlap.
+
+## Related checklist items this satisfies
+
+- "Distance-three and distance-five decoder comparisons are separate." —
+  `test_distances_are_kept_separate_and_inputs_come_from_the_helper`.
+- "All four supplied decoders are compared on the same held-out shots." —
+  `test_all_task_b_models_use_identical_test_shots` and
+  `test_supplied_decoder_metrics_match_hand_count`.
+- "The linear combined decoder uses event density and the four aligned
+  predictions." — the inputs are exactly what `google_meta_model_input`
+  returns, enforced in `google_splits()`.
+- "The short report explains decoder-error overlap ..." — this half of the
+  checklist line is Task B's job: `decoder_overlap()`, tested by
+  `test_decoder_overlap_matches_hand_calculation`.
+- "Tests cover ... bit order, event counts ..." —
+  `test_toy_packing_is_little_endian_within_each_byte`,
+  `test_bad_google_rows_are_rejected`,
+  `test_zero_padding_bits_are_accepted` and
+  `test_nonzero_padding_bits_are_rejected`.
+
 # Task C design decisions — bounded raw-detector prototype
 
 ## What Task C is
