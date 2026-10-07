@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 import uuid
@@ -96,12 +97,31 @@ def command_run(_: Settings) -> int:
 
 
 def command_train(_: Settings) -> int:
-    console.print(
-        "[yellow]The AI/ML stage is intentionally unimplemented.[/yellow]\n"
-        "Consume the required ML input tables through the supplied helpers and "
-        "write model files and the required results/part2 files."
-    )
-    return 2
+    """This function runs Part II and prints the test results."""
+    from .stages import train
+
+    try:
+        result = train.run(str(uuid.uuid4()))
+    except Exception as exc:
+        console.print(f"[red]FAILED[/red] train: {type(exc).__name__}: {exc}")
+        return 1
+
+    metrics = json.loads((train.RESULTS_PART2 / "metrics.json").read_text())
+    summary = Table(title=f"Part II run {result.run_id} (test split)")
+    for column, justify in (("Model", "left"), ("Logical-error rate", "right"),
+                            ("Balanced acc.", "right"), ("Brier", "right")):
+        summary.add_column(column, justify=justify)
+    # Task B has one block of models per distance.
+    blocks = [block for task in metrics.values()
+              for block in ([task] if "models" in task else task["distances"].values())]
+    for block in blocks:
+        for model_id, m in block["models"].items():
+            brier = "n/a" if m["brier_score"] is None else f"{m['brier_score']:.4f}"
+            summary.add_row(model_id, f"{m['logical_error_rate']:.4f}",
+                            f"{m['balanced_accuracy']:.4f}", brier)
+    console.print(summary)
+    console.print(f"[green]OK[/green] Part II finished; results in {train.RESULTS_PART2}/")
+    return 0
 
 
 def parser() -> argparse.ArgumentParser:
