@@ -1,16 +1,5 @@
 # PART 2 REPORT
 
-
-## PART A
-
-
-
-## PART B
-
-
-
-## PART C
-
 # Task C design decisions — bounded raw-detector prototype
 
 ## What Task C is
