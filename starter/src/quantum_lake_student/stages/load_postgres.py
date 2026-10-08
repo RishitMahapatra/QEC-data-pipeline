@@ -17,9 +17,6 @@ After the loads, run() creates v_qec_experiment_catalog, a UNION view that lists
 experiments/circuits side by side in the shared QEC vocabulary (code_family, distance, rounds).
 '''
 
-# Detector storage decision: detector_bits is stored as one packed BYTEA value per shot row,
-# not one row per individual detector (200 detectors = 25 bytes for distance 3, 600 = 75 bytes
-# for distance 5). Full reasoning and measured sizes: reports/gold_stage/gold_stage_google_qec.md
 
 import hashlib # SHA-256 for Silver input hashes and syndrome observation ids
 import io #used to read the raw MinIO bytes so pyarrow can read them as a file

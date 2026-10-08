@@ -1,25 +1,9 @@
-"""Register and verify the original source files.
 
-Student responsibilities:
-
-- verify checksums from the release description;
-- list source files and archive members safely;
-- confirm each source has the documented files (CSV set/names/header for
-  qec_syndromes, companion files per experiment for google_qec, source +
-  transpiled circuits for qasmbench) - a missing required file stops the run,
-  same severity as an unsafe archive member;
-- keep the supplied bytes unchanged;
-- report missing or unexpected source objects;
-- make a second run safe: no duplicate source records.
-"""
 # ─────────────────────────────────────────────────────────────────────────
 # OVERVIEW
 #
-# This file is the Bronze-stage entry point for the pipeline. It is the
-# first code that runs after `make bootstrap` copies the raw zip files
-# into MinIO. Its job is to prove those three files are exactly what the
-# course says they should be, before anything downstream (Silver parsing,
-# Gold loading, ML export) is allowed to trust them.
+# This file is the Bronze-stage entry point for the pipeline. Its job is to prove those three files are exactly what the
+# course says they should be, before anything downstream (Silver parsing, Gold loading, ML export) is allowed to trust them.
 #
 # Concretely, for each of the 3 mandatory sources (qec_syndromes, google_qec,
 # qasmbench), this file:
@@ -34,10 +18,10 @@ Student responsibilities:
 #      later pipeline run has a paper trail of exactly what was verified,
 #      when, and against which hashes.
 #
-# Everything here is read-only against Bronze — this file never edits,
+# Everything here is read-only against Bronze, this file never edits,
 # extracts, or rewrites the source zips. If any check fails, it raises
 # BronzeError, which is meant to stop the whole run rather than let bad
-# data flow forward silently.
+# data flow forward without a clear error.
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -45,7 +29,7 @@ import io #treats the raw bytes file as a normal file so that zipfile can open t
 import zipfile # for reading the zipfile directly from memory
 import json #for handling the JSON files
 import re #request -> for pattern matching for file names and folders
-from pathlib import Path # convenient, OS-safe file path handling
+from pathlib import Path 
 
 from quantum_lake_student.models import RESULTS_PART1, StageResult, code_revision, merge_json_file
 
@@ -61,8 +45,8 @@ def _bronze_key(manifest_path: str) -> str:
     """Map a manifest path like 'raw/source=X/f.zip' to its Bronze key 'bronze/source=X/f.zip'."""
     return manifest_path.replace("raw/", "bronze/", 1)
 
-#adding a hashing function 
-import hashlib #hashlib uses the SHA-256 encryption algo to verify file integrity
+ 
+import hashlib #hashlib uses the SHA-256 encryption algo. to verify file integrity
 
 # ADDED: bronze_inventory lets us cross-check the manifest against what's
 # actually sitting in MinIO, so a genuinely missing object is caught here
@@ -265,8 +249,7 @@ def run(run_id: str) -> StageResult:
     # ADDED: list what's actually sitting in Bronze right now, so we can both
     # (a) confirm each mandatory object truly exists before fetching it, and
     # (b) report any *unexpected* extra object the manifest doesn't mention —
-    # this closes the "report missing or unexpected source objects" line
-    # from the module docstring, which previously only covered "missing".
+    # this closes the "report missing or unexpected source objects"
     inventory = dict(bronze_inventory(settings))
 
     manifest = _load_manifest() #read the expected-objects manifest

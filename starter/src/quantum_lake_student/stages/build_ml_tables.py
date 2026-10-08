@@ -1,19 +1,21 @@
-"""Create the required analyses and ML input tables from PostgreSQL Gold.
+"""
+This file creates the required analyses and ML input tables from PostgreSQL Gold.
 
-Write the Gold queries/views, joins, stable example IDs, and export logic.
+In this stage we write the Gold queries/views, joins, stable example IDs, and export logic.
 A thin export step may execute SQL, use the course split helpers, validate the
-fixed contracts, and write Parquet. It must not re-read Bronze or Silver.
+fixed contracts, and write Parquet. It does not re-read Bronze or Silver .
 
-This stage is that thin step. All data logic (joins, example_id, the decoder
-pivot) lives in the Gold views v_ml_syndrome_decoder_example and
-v_ml_google_decoder_example, created by load_postgres.run(). Here we only:
+All data logic (joins, example_id, the decoder pivot) lives in the Gold views v_ml_syndrome_decoder_example and
+v_ml_google_decoder_example, created by load_postgres.run(). 
+Here we only:
+
 1) select from those views,
 2) add data_split with the course helpers (syndrome_data_split, google_data_split),
 3) check both contracts from assignment/required-ml-tables.md,
 4) check every example_id resolves to its Gold record(s),
 5) write ml/ml_syndrome_decoder_example.parquet and ml/ml_google_decoder_example.parquet,
 6) run the three Part I analysis queries and save their results next to the SQL.
-Nothing here reads Bronze or Silver.
+
 """
 
 from __future__ import annotations
@@ -157,8 +159,7 @@ def check_google_contract(table: pa.Table) -> None:
     _check_no_nulls(table, errors)
     _check_ids_and_splits(table, errors)
 
-    # distance-3 and distance-5 rows must each have one feature width, so
-    # Part II can build their raw-detector matrices separately
+    # distance-3 and distance-5 rows must each have one feature width, so Part II can build their raw-detector matrices separately
     widths: dict[int, set[int]] = {}
     for distance, count in zip(table["distance"].to_pylist(), table["detector_count"].to_pylist()):
         widths.setdefault(distance, set()).add(count)
@@ -173,8 +174,7 @@ def check_google_contract(table: pa.Table) -> None:
         if len(bits) != (count + 7) // 8:
             errors.append(f"{r['example_id']}: {len(bits)} detector bytes, expected ceil({count}/8)")
             continue
-        # bits are little-endian inside each byte, so unused padding bits are
-        # the high bits of the last byte
+        # bits are little-endian inside each byte, so unused padding bits are the high bits of the last byte
         if count % 8 and bits[-1] >> (count % 8):
             errors.append(f"{r['example_id']}: unused padding bits are not zero")
         if int.from_bytes(bits, "little").bit_count() != r["detector_event_count"]:

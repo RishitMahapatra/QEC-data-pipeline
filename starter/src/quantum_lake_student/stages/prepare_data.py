@@ -220,7 +220,7 @@ def check_b8_size(data: bytes, bits_per_shot: int, shots: int, label: str) -> in
         )
     return record_bytes
 
-#will later be used for the data issues parquet
+#this function will later be used for the data issues parquet
 def dirty_padding_shots(data: bytes, bits_per_shot: int) -> list[int]:
     """Shot indices whose unused padding bits (high bits of the last byte) are not all zero."""
     pad_start = bits_per_shot % 8
@@ -612,8 +612,7 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
 
     result.finish()
 
-    # stabilizer checks and corrections are derived from accepted circuits
-    # only, so a rejected member removes its rows from all three tables at once
+    # stabilizer checks and corrections are derived from accepted circuits only, so a rejected member removes its rows from all three tables at once
     rejected_members = len(issues)
     merge_json_file(
         RESULTS_PART1 / "row_counts.json",
@@ -654,7 +653,6 @@ def prepare_qasmbench_silver(settings: Settings, run_id: str) -> StageResult:
 
 @dataclass
 class _ParsedCircuit:
-    # all rows produced by one .qasm member; published together or not at all
     circuit: dict[str, Any]
     stabilizer_checks: list[dict[str, Any]]
     corrections: list[dict[str, Any]]
@@ -1283,8 +1281,4 @@ def run(run_id: str) -> StageResult:
             },
         },
     )
-
-    # qasmbench row_counts.json / run.json entries are written by
-    # prepare_qasmbench_silver itself, which has the per-table counts
-
     return result
