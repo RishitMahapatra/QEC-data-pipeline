@@ -1,4 +1,4 @@
-# Part I design report — QEC data pipeline
+# Part I design report: QEC data pipeline
 
 This is the single Part I design report requested in `assignment/brief.md`. It covers source discovery, the architecture, the Gold
 design, the important decisions, the rejected relationship, quality findings,
@@ -297,31 +297,38 @@ array and so rejects it.
 
 ### 6.5 Detector-storage choice (measured)
 
-`detector_bits` is stored as **one packed `BYTEA` value per shot**.
+`detector_bits` is stored as **one packed `BYTEA` value per shot**, plus a
+per-shot `detector_event_count`. No further detector table is built. The
+assignment's two alternatives were measured on the real Gold data (the
+fired-detector rows were built as a temporary table with
+`get_bit(detector_bits, i)`; sizes from `pg_total_relation_size`, including
+indexes):
 
-| | Packed per shot (chosen) | One row per detector |
-| --- | --- | --- |
-| d=3 | 200 detectors → 25 bytes × 200,000 shots | 200 × 200,000 = 40,000,000 rows |
-| d=5 | 600 detectors → 75 bytes × 50,000 shots | 600 × 50,000 = 30,000,000 rows |
-| Total | **8,750,000 bytes of detector data** (measured: `SUM(octet_length(detector_bits))` = 8,750,000) | **70,000,000 rows** (280× the row count) |
+| Option | Rows | Size |
+| --- | ---: | ---: |
+| Packed bits + `detector_event_count` on `gold_google_shot` (chosen) | 250,000 (one per shot) | **103 MB** for the whole shot table, including measurement and sweep bits; 8,750,000 bytes of detector data (`SUM(octet_length(detector_bits))`) |
+| One row per fired detector | 10,446,925 (= `SUM(detector_event_count)`) | **1,439 MB** with its primary key |
+| Per-position summaries (fire count per experiment and detector) | 1,400 (4 × 200 + 600) | 136 kB |
 
-Measured with `pg_total_relation_size` (including indexes): all of
-`gold_google_shot` (250,000 rows, including the measurement and sweep bits)
-is **103 MB** and `gold_google_experiment` is 80 kB.
-
-The required analyses only need a per-shot `detector_event_count`, and the ML
-table needs the packed bytes, so neither needs one row per detector. The
-export copies the packed bytes directly from Gold. A test checks that they
-are byte-for-byte equal to Silver, which shows the ML table is reproduced
-without returning to Bronze or Silver. **Cost:** SQL cannot easily filter on
-one detector (for example, "shots where detector 17 fired"). The bits must be
-unpacked in Python with `numpy.unpackbits(..., bitorder="little")`.
+No required analysis looks at single detectors: decoder error by distance
+and location (query 2) comes from the predictions. The ML table needs the
+packed bytes, and Task B's event-density input comes from
+`detector_event_count`. Fired-detector rows would duplicate the packed bytes
+at 14× the size of the whole shot table, and per-position summaries lose
+the link to individual shots, so neither is built. The export copies the
+packed bytes directly from Gold. A test checks that they are byte-for-byte
+equal to Silver, which shows the ML table is reproduced without returning
+to Bronze or Silver. **Cost:** SQL cannot easily filter on one detector (for
+example, "shots where detector 17 fired"). The bits must be unpacked in
+Python with `numpy.unpackbits(..., bitorder="little")`, or with `get_bit`.
 
 ### 6.6 All-or-nothing load
 
 `load_postgres.run()` opens **one transaction for all three sources**:
 
-1. Create the schema and tables (if it doesn't exist).
+1. Create the `gold` schema and the tables, if they don't exist. All three
+   sources share this one schema (not `public`), set once with
+   `search_path` before any source is loaded.
 2. Load Google (truncate, then insert), then syndromes (upsert keyed by the
    deterministic IDs, then delete rows no longer in Silver), then QASMBench
    (truncate with cascade, then insert).
@@ -341,6 +348,17 @@ against both explicitly:
   Silver. After the upsert, the load deletes every Gold row whose key is not
   in the current Silver read.
 
+QASMBench is rebuilt instead of upserted because it is tiny (6 circuits,
+4 checks, 6 corrections). Truncating `gold_qasmbench_circuit` with `CASCADE`
+also clears its three child tables, and the IDs are derived from the
+unchanged Bronze input. A rerun therefore lands on the same identifiers and
+row counts and adds no duplicates.
+
+The independent re-count in step 3 was added after review. An earlier
+version wrote `gold_loaded` in `row_counts.json` from the same Python
+variable as `silver_rows`, so the match was always true and never checked
+the database.
+
 A failure in any source therefore leaves the previous complete Gold state
 untouched for all three. A test proves this by breaking only the QASMBench
 load: the Google and syndrome tables loaded earlier in the same run are
@@ -356,11 +374,11 @@ files, on the shared "distance 3" label.
 
 **Evidence against:**
 
-| | QASMBench (`qec_sm_n5`) | QASMBench (`error_correctiond3_n5`) | Google d=3 |
-| --- | --- | --- | --- |
-| Qubits | `q[3]` + `a[2]` = 5 | `q[5]` = 5, no ancilla or syndrome register | `data_qubits: 9`, `measure_qubits: 8` = 17 |
-| Code | bit-flip **repetition** code (2 neighbouring parity checks) | no explicit parity-check structure | **surface** code, 200 detectors over 25 rounds |
-| Shots or labels | none: a circuit definition | none | 50,000 shots per experiment |
+| | QASMBench (`qec_sm_n5`) | QASMBench (`error_correctiond3_n5`) | Google d=3 | Simulated syndromes `d-3` |
+| --- | --- | --- | --- | --- |
+| Qubits | `q[3]` + `a[2]` = 5 | `q[5]` = 5, no ancilla or syndrome register | `data_qubits: 9`, `measure_qubits: 8` = 17 | not given; only `d-3` in the filename |
+| Code | bit-flip **repetition** code (2 neighbouring parity checks) | no explicit parity-check structure | **surface** code, 200 detectors over 25 rounds | **surface** code, 16 syndrome bits (4 rounds × 4 checks) |
+| Shots or labels | none: a circuit definition | none | 50,000 shots per experiment | aggregate rows: pattern + logical-error label + `quantity` weight (10M per file) |
 
 The same distance number refers to different codes with different qubit
 counts, and no row-level identifier links a circuit statement to a hardware

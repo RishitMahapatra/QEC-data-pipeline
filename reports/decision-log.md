@@ -1,33 +1,31 @@
-# Part I — discovery decision log
+# Discovery Decision Log
 
-This is the discovery decision log that `assignment/getting-started.md` asks
-for, which answers each "questions to investigate" from `assignment/data-sources.md`.
-Each answer gives the conclusion and points to the code, test or query that
-proves it, so the answer can be checked rather than just believed. The design
-built on these findings is explained in the Part I report,
+This is the discovery decision log that is requested in the assignment, which answers each "questions to investigate" from `assignment/data-sources.md`.
+Each answer gives the conclusion and points to the code, test or query that proves it, so the answer can be checked. The design
+built and made on these findings is explained in the Part I report,
 [reports/part1.md](../reports/part1.md).
 
 ---
 
 ## qec_syndromes
 
-Questions from `assignment/data-sources.md`:
-
-### Does the documented schema match the actual header? — *Stage: Bronze (done)*
+### Does the documented schema match the actual header? — *Stage: Bronze*
 Yes, enforced by code, not just sampled. `register_sources.py`'s
 `_check_syndrome_structure` reads the header line of all 7 CSVs and raises
 `BronzeError` on any mismatch against `labels,syndromes,quantity`. This runs
 every time the Bronze stage runs, so it can't silently regress.
 
 ### Does every parsed sequence have the same round/check shape and binary domain? — *Stage: Silver (shape/domain check in `prepare_data.py`)*
-Done — confirmed across all 7 files, not just row 0. `build_syndromes`
+Yes, and it's confirmed across all 7 files, not just row 0. `build_syndromes`
 rejects any row whose parsed `syndromes` value isn't exactly 4 tuples of 4
-binary values (`syndromes.shape`); running it against the real Bronze zip
-(`test_accepted_quantity_reconciles_to_filename_hint_on_real_bronze_zip`)
-produces 0 `syndromes.shape` issues across the whole dataset.
+binary values (`syndromes.shape`). On the real data,
+`starter/results/part1/data_issues.parquet` is empty, so there are 0
+`syndromes.shape` issues across the whole dataset.
+`test_malformed_tuple_is_rejected_into_issues` proves that the rule rejects
+a badly shaped row.
 
 ### Do quantities reconcile to the filename sample count? — *Stage: Silver (positive-quantity + 10M reconciliation check)*
-Yes. We checked all 7 files, not just one. Each file's accepted `quantity`
+Yes, we checked all 7 files, not just one. Each file's accepted `quantity`
 sums to **exactly 10,000,000**, matching its `nb-10M` filename hint, so the
 dataset totals 70,000,000. No `syndromes.weighted_total_reconciliation`
 warnings are raised on the supplied data. The same totals are checked
@@ -36,24 +34,15 @@ and they appear in the output of `query1_weighted_syndrome_by_fault_rate.sql`
 (each fault rate's two label rows sum to 10M). See part1.md section 5.
 
 ### Can the same syndrome occur under both logical-error labels? — *Stage: Silver (must accept both rows as valid, not dedupe)*
-Done. Yes — confirmed against the real Gold data, not just a synthetic test
+Yes, it was confirmed against the real Gold data, not just a synthetic test
 case. `test_same_syndrome_both_labels_are_both_kept` proves the code never
-dedupes a collision; querying the real dataset
-(`SELECT syndrome_bits FROM gold_syndrome_observation GROUP BY syndrome_bits HAVING COUNT(DISTINCT logical_error_label) > 1`)
-shows **18,676 distinct patterns** occur under both labels across the 7
-files — this is common, not a rare edge case. Both rows are correctly
-retained for each one, not deduped.
+unduplicates a collision. By querying the real dataset
+(`SELECT syndrome_bits FROM gold_syndrome_observation GROUP BY syndrome_bits HAVING COUNT(DISTINCT logical_error_label) > 1`), it shows that 18,676 distinct patterns occur under both labels across the 7 files (which is common and not a rare edge case). Both rows are correctly retained for each one, not deduped.
 
 ### What is the correct key if syndrome alone is not unique? — *Stage: Silver (`source_record_id` design for `syndrome_observation.parquet`)*
-Resolved, differently than the original candidate. Silver's
-`source_record_id` is `sha256(filename:row_index)` — a hash of the row's
-*position* in its source file, not a hash of its content
-`(experiment_id, syndromes, labels)`. This is simpler and still fully stable
-(same file + same row position -> same id on every rerun), and doesn't
-require re-hashing the full syndrome value. The content-based composite key
-idea was used instead at the Gold layer: `gold_syndrome_observation.observation_id`
-is `sha256(experiment_id:syndrome_bits:label)`, matching this table's
-`UNIQUE (experiment_id, syndrome_bits, logical_error_label)` constraint. See
+The key is the combination (experiment, syndrome, label). A syndrome on its own repeats across files and can show up with both labels, but this combination appears only once.
+Silver: source_record_id = sha256(filename:row_index). Each row is identified by where it sits in its source file, which stays stable across reruns.
+Gold: observation_id = sha256(experiment_id:syndrome_bits:label), backed by UNIQUE (experiment_id, syndrome_bits, logical_error_label) See
 part1.md section 6.4.
 
 ### Which aggregates must use `quantity` as a weight? — *Stage: Gold/ML (Silver only carries `quantity` through unchanged)*
@@ -72,7 +61,7 @@ label) pairs exist, not how often they happen.
   A must use it in every evaluation metric and, where the model supports it,
   in fitting (`assignment/part-2-ai-ml.md`).
 
-### Why must a model split keep an entire physical-fault-rate group together? — *Stage: ML export (course split) / Part II*
+### Why must a model split keep an entire physical-fault-rate group together? — *Stage: ML export (course split), belongs to Part II*
 Because the same syndrome patterns occur in many fault-rate files. A
 row-level random split would put the same input in both train and test, so
 the test score would mostly measure memorisation. Gold shows how much the
@@ -84,20 +73,12 @@ files overlap:
   **14,168 (97 %) also occur in the training files**. This was measured
   with a join over `gold_syndrome_observation` and `gold_syndrome_experiment`.
 
-Keeping each file whole also means the test answers a meaningful question:
-*how does a model trained at other noise levels do at an unseen noise
-level?* The course helper `ml.syndrome_data_split` assigns whole files:
-0.0005 → validation, 0.005 → test, every other rate → train. The export
-applies it per row from `physical_fault_rate`, so no file is ever split.
-This gives 53,304 / 1,407 / 20,887 rows. A pattern seen in training can
-still appear in the test file, but with that file's own label frequencies
-and weights.
+Each file (one noise level) goes entirely into one split: 0.0005 → validation, 0.005 → test, the rest → train (53,304 / 1,407 / 20,887 rows). This way the test measures how the model does at a noise level it never trained on. The same syndrome pattern can appear in train and test, but with different label counts and weights, because it comes from a different experiment.
 
 ---
 
 ## google_qec
 
-Questions from `assignment/data-sources.md`:
 
 ### Do filenames and properties agree? — *Stage: Silver (compare dirname-encoded values against `properties.yml` fields while parsing)*
 Yes, for all 5 experiments. `prepare_data.py`'s `check_google_experiment_name`
@@ -105,7 +86,7 @@ parses `(basis, distance, rounds, row, col)` from the folder name
 (`surface_code_b<basis>_d<distance>_r<rounds>_center_<row>_<col>`). It
 compares that with `properties.yml`'s `basis`, `distance`, `rounds`,
 `center_data_qubit_row` and `center_data_qubit_col`, and any difference stops
-the run (`GoogleSilverError`). On the supplied data all 5 agree:
+the run. On the supplied data all 5 agree:
 
 | Folder | basis | d | rounds | center |
 | --- | --- | ---: | ---: | --- |
@@ -118,8 +99,8 @@ the run (`GoogleSilverError`). On the supplied data all 5 agree:
 Gold also enforces `UNIQUE (basis, distance, rounds, center_row, center_col)`,
 so two experiments can never claim the same configuration.
 
-### Does every companion file exist? — *Stage: Bronze (done)*
-Yes — enforced by code, not just sampled. `register_sources.py`'s
+### Does every companion file exist? — *Stage: Bronze*
+Yes, it is enforced by code. `register_sources.py`'s
 `_check_google_structure` confirms exactly 5 experiment directories and all
 15 documented companion files per directory, raising `BronzeError` on any
 gap. Runs every Bronze execution.
@@ -141,11 +122,11 @@ exactly `shots × ceil(bits / 8)` bytes:
 | d=5 | `sweep.b8` | 25 | 4 | 200,000 |
 
 `check_b8_size` stops the run on any size mismatch, because a wrong length
-means the shots in that file no longer line up with the other files. In each
+means that the shots in that file no longer line up with the other files. In each
 record, bits are little-endian (bit *i* is `(byte[i // 8] >> (i % 8)) & 1`).
 The unused high bits of the last byte must be zero: `dirty_padding_shots`
 excludes and logs any shot that breaks this. On the supplied data, no file
-has the wrong size and no shot has non-zero padding. Tests:
+has the wrong size and no shot has non-zero padding. The corresponding tests:
 `test_packed_bits_are_little_endian_within_each_byte`,
 `test_padding_is_the_high_bits_of_the_last_byte`,
 `test_shot_with_dirty_padding_is_excluded_and_reported`.
@@ -177,29 +158,61 @@ happened. In the Google trace example (part1.md section 9.2), the actual flip
 is `true`: belief matching and tensor network predict `true` (correct), while
 correlated matching and PyMatching predict `false` (`was_wrong = true`).
 
-### What should Gold do with detector events: one row per fired detector, or per-position summaries? — *Stage: Gold (relational design decision)*
-Store them packed: **one `BYTEA` value per shot**, plus a per-shot
-`detector_event_count`. We measured both options before choosing:
+### Beyond the packed per-shot bits the Google `ml` table needs, what should Gold do with detector events: one row per fired detector, or per-position summaries? Which supports the required analyses, and at what size? — *Stage: Gold (relational design decision)*
+**Neither.** Gold keeps the packed bits (**one `BYTEA` value per shot**,
+needed by the ML table) and adds one per-shot summary,
+`detector_event_count`. No required analysis looks at single detectors:
+decoder error per distance and location (query 2) comes from the predictions,
+and the count feeds the event-density input of Task B. We measured all three
+options on the real Gold data:
 
-- Packed: 200,000 × 25 + 50,000 × 75 = **8,750,000 bytes** of detector data.
-  This was confirmed in Gold with `SUM(octet_length(detector_bits))`. The
-  whole `gold_google_shot` table is 103 MB (`pg_total_relation_size`).
-- One row per detector: 200 × 200,000 + 600 × 50,000 = **70,000,000 rows**,
-  which is 280× more rows.
+| Option | Rows | Size | Supports the required analyses? |
+| --- | ---: | ---: | --- |
+| Packed bits + `detector_event_count` on `gold_google_shot` (chosen) | 250,000 (one per shot) | 103 MB for the whole shot table; 8,750,000 bytes of detector data | Yes: the analyses need no single detectors, and the ML export gets the bits and the count |
+| One row per fired detector `(experiment_id, shot_index, detector_index)` | **10,446,925** (5,667,180 at d=3, 4,779,745 at d=5) | **1,439 MB** with its primary key (763 MB of table data) | Yes, but nothing in them needs a single detector |
+| Per-position summaries: fire count per (experiment, detector position) | 1,400 (4 × 200 + 600) | 136 kB | No: they lose the per-shot link, so they cannot be joined to decoder mistakes |
 
-The required analyses only need `detector_event_count`, and the ML table
-needs the packed bytes, which the export copies from Gold unchanged (tested
-byte for byte against Silver). The cost is that SQL cannot filter on one
-detector; the bits must be unpacked in Python. See part1.md section 6.5.
+The fired-detector rows were built as a temporary table from
+`get_bit(detector_bits, i)` over every shot. Their count equals
+`SUM(detector_event_count)`, and the 1,400 summaries add up to the same
+total. On average 28.3 of 200 detectors fire per d=3 shot and 95.6 of 600
+per d=5 shot, so fired-only rows are about 7× fewer than one row per
+detector (70,000,000), but still 42× more rows than shots and 14× the size
+of the whole shot table, as a duplicate of bytes Gold already stores.
 
-### Which supplied decoders make different mistakes, and can a simple combined model use that disagreement? — *Stage: Part II (Task B)*
-Part I gives a first answer: the decoders' error *rates* differ in a stable
-way (query 2, part1.md section 10). Tensor network contraction and belief
-matching are best, then correlated matching, then PyMatching. Individual
-shots show disagreement too: in the trace example, two decoders are right
-and two are wrong on the same shot. Whether a linear combination of the four
-predictions can use this is Part II Task B, and the answer will be added
-here when Part II is done.
+The per-position summaries are small and cheap, but no required analysis
+asks "which detector fires most", so we do not build them. They can be
+derived later from the packed bits without changing the schema. The cost of
+the chosen design is that SQL cannot filter on one detector; the bits must
+be unpacked (in Python, or with `get_bit` as above). The ML export copies
+the packed bytes from Gold unchanged (tested byte for byte against Silver).
+See part1.md section 6.5.
+
+### Which supplied decoders make different mistakes, and can a simple combined model use that disagreement to predict the actual label? — *Stage: Part II (Task B)*
+**They make partly different mistakes, but a linear combination cannot use
+that: it only ties the best single decoder.**
+
+- **Ranking (test logical error rate, d=3 / d=5):** tensor network
+  contraction 0.3967 / 0.3952, belief matching 0.4013 / 0.3994, correlated
+  matching 0.4220 / 0.4226, PyMatching 0.4364 / 0.4548. The order is the
+  same at both distances and matches Part I query 2.
+- **Different mistakes:** the four decoders disagree on 55.4% (d=3) and
+  64.8% (d=5) of test shots. For each pair, the shared mistakes divided by
+  all mistakes of either decoder is 0.36–0.53 at d=3 and 0.33–0.49 at d=5,
+  so most pairs share less than half of their errors.
+- **Shared mistakes:** all four are wrong on 14.4% (d=3) and 10.9% (d=5) of
+  test shots. No combination of their answers can fix these.
+- **Combined model:** the five-input logistic regression we made (event density +
+  four predictions, threshold 0.51 / 0.55 chosen on validation), reaches
+  0.3977 at both distances, so it does not beat tensor network contraction.
+  Compared with that decoder it fixes about as many shots as it breaks
+  (d=3: 6.6% fixed, 6.7% broken; d=5: 5.3% fixed, 5.6% broken). Among the
+  decoders, its largest coefficient is on tensor network contraction
+  (0.53 / 0.59) and its smallest on PyMatching (0.17 / 0.22), so it mostly
+  follows the best decoder.
+
+The disagreement alone is not enough: a fixed linear vote cannot tell which
+decoder is right on a given shot. See part2.md, Task B.
 
 ### Why should distances three and five use separate raw-detector models? — *Stage: Part II (feature-width design)*
 The inputs have different shapes and meanings:
@@ -207,24 +220,21 @@ The inputs have different shapes and meanings:
 - A d=3 shot has 200 detector bits (25 bytes); a d=5 shot has 600 (75
   bytes). A single flat feature vector cannot hold both without padding.
 - Even with padding, bit *i* means a different detector at d=3 than at d=5,
-  because the codes have different layouts. Position *i* would have no
+  because the codes have different layouts. Postion *i* would have no
   shared meaning across distances.
 
 The ML export's contract check therefore keeps one feature width per
-distance. Part II Task C trains its MLP only on d=3 (`shot_index < 12_500`).
+distance. In Part II Task C , we train the MLP only on d=3 (`shot_index < 12_500`).
 
 ---
 
 ## qasmbench
 
-*Stage: Silver for all items below — this is the QASM parser feeding
-`circuit.parquet`, `stabilizer_check.parquet`, and
-`conditional_correction.parquet`. (File-existence for these 6 files is
+This is the QASM parser feeding for items below (Silver stage). (File-existence for these 6 files is
 already Bronze-checked by `_check_qasmbench_structure`; content parsing is
-not.)*
+not.)
 
-No explicit question list in `data-sources.md`; it instead lists what to
-extract at minimum:
+This is the must list of the things we had to extract:
 
 - [x] stable member locator and file hash — `source_record_id` is
       `qasmbench:<member path>`; `source_trace.parquet` records the member and
@@ -232,10 +242,13 @@ extract at minimum:
 - [x] benchmark and source/transpiled variant — from the member's folder name
       and the `_transpiled.qasm` suffix; `circuit_id` = `<benchmark>:<variant>`
 - [x] declared quantum/classical register sizes — `register_declarations`
-      (JSON of qregs/cregs with sizes, in declaration order)
-- [x] measurement and two-qubit counts, expanded — custom gates are
-      decomposed first (a gate body is a definition, counted only where it is
-      invoked), and register-wide statements count once per qubit
+      (JSON of qregs/cregs with sizes, in declaration order), plus
+      `qubit_count`, the total of all declared qubits
+- [x] operation, measurement, and two-qubit counts — the executed operations
+      are counted as `measurement_count` and `two_qubit_gate_count`, as the
+      Silver contract defines them. Custom gates are decomposed first (a gate
+      body is a definition, counted only where it is invoked), and
+      register-wide statements count once per qubit
 - [x] parity-check ancilla, data participants, and syndrome bit where explicit
 - [x] syndrome-controlled correction value, gate, and target
 
@@ -249,7 +262,7 @@ All 6 files parsed (3 benchmarks × source/transpiled):
 
 Source and transpiled variants give the same numbers.
 
-**Decision — what counts as an explicit parity check.** A check is recorded
+**Decision: what counts as an explicit parity check.** A check is recorded
 when data qubits act as CNOT controls onto one ancilla qubit that is only ever
 a CNOT target (no single-qubit gates on it), and that ancilla is then measured
 into a classical bit. That is the syndrome bit. In `qec_sm_n5`, `a[0]` checks
@@ -262,7 +275,7 @@ CNOTs, and is measured together with the data qubits into one register
 says which classical bit is a syndrome bit. `data-sources.md` asks for checks
 "where explicit", so we do not guess a role for these qubits.
 
-**Decision — conditional operations.** Each single-qubit gate inside an
+**Decision: conditional operations.** Each single-qubit gate inside an
 `if(reg==value)` is one `conditional_correction` row; `if(...) x q;` on a whole
 register gives one row per qubit. Gates inside an `if` block are not added to
 `measurement_count` / `two_qubit_gate_count`, because they only run when the
@@ -278,131 +291,19 @@ rejected); checks and corrections come only from accepted circuits.
 
 ---
 
-## qasmbench Gold design
+## Gold design
 
-*Stage: Gold (`load_postgres.py`, `load_qasmbench_gold` / `_load_qasmbench`).
-Loads the three QASMBench Silver tables into four Postgres tables, scoped to
-QASMBench only for its own schema/rows — but as of the merge with
-`google_qec`'s and `qec_syndromes`' Gold code (from the team's
-`rishit_mahapatra` and `dari` branches), qasmbench loads inside the same
-single shared transaction as every other source, in `run()`. All three
-sources' code lives in one `load_postgres.py`, and qasmbench follows the
-same two-tier shape google_qec established: `load_qasmbench_gold(conn,
-settings)` is a connection-scoped loader (truncate + insert + return counts
-and hashes, no commit of its own), and `_load_qasmbench(conn, settings)`
-wraps it — runs the schema DDL, calls the loader, then re-queries the actual
-Gold tables and raises if they disagree with what the loader returned.*
-
-**Decision — table names and shared `gold` schema (team decision, resolved
-across all three sources together).** Tables are `gold_qasmbench_circuit`,
-`gold_qasmbench_register`, `gold_qasmbench_stabilizer_check`,
-`gold_qasmbench_conditional_correction`. `run()` does
-`CREATE SCHEMA IF NOT EXISTS gold` and `SET search_path TO gold` once, before
-loading any source, so every source's Gold tables — `gold_google_*`,
-`syndrome_*`, and `gold_qasmbench_*` alike — live in the same dedicated
-`gold` schema, not `public`. An earlier draft of this design put qasmbench's
-tables in their own `qec` schema; that was dropped once a teammate flagged
-during review that the team should pick one schema strategy together rather
-than each source doing its own thing, and `google_qec`'s and `qec_syndromes`'
-code (independently arriving at the same `gold` schema) was already the
-majority direction.
-
-**Decision — re-query the actual Gold table instead of trusting the
-loader's own count (also from that same review).** An earlier version of
-this code wrote `row_counts.json`'s `"gold_loaded"` field from the *same*
-Python variable as `"silver_rows"`, making `"match"` trivially always
-`True` — it never actually checked the database. `_load_qasmbench` now runs
-`SELECT COUNT(*)` against each of the four real tables after loading and
-compares that independent count to what `load_qasmbench_gold` returned;
-any disagreement raises `RuntimeError` *inside* the still-open transaction,
-which rolls back not just qasmbench's rows but every source loaded earlier
-in the same `run()` call (google_qec, syndromes) — proven by
-`test_load_qasmbench_detects_row_count_mismatch_and_raises` and
-`test_run_rolls_back_google_and_syndromes_when_qasmbench_load_fails`.
-
-**Decision — normalize `register_declarations` instead of copying it.**
-Silver's `circuit.parquet` keeps `register_declarations` as one JSON-text
-column (a nested list of qreg/creg name+size pairs). Gold decomposes it into
-its own table, `gold_qasmbench_register` (one row per declared register, FK
-to `gold_qasmbench_circuit`), instead of also carrying a JSONB copy of the
-same column. Two representations of the same fact with nothing to keep them
-in sync is worse than one; the brief says Gold must not "merely copy each
-Silver table into PostgreSQL", and turning an opaque JSON blob into typed,
-constrained (`register_size > 0`, `register_kind IN ('qreg','creg')`) rows is
-exactly that kind of value-add. Only 4 registers per circuit variant (q, a,
-c, syn for the parity-check benchmark) — decomposing costs one small table,
-not real complexity.
-
-**Decision — keep `data_qubits` as a native `text[]` column, not a junction
-table.** `stabilizer_check.parquet`'s `data_qubits` is a small (2 elements),
-fixed-shape, ordered attribute of one check row, not an independent
-many-to-many relationship worth its own table — across the whole QASMBench
-archive it's ~8 total (qubit, check) pairs.
-`gold_qasmbench_stabilizer_check.data_qubits` is `text[]` with
-`CHECK (cardinality(data_qubits) >= 1)`. Postgres arrays are queryable
-(`= ANY(data_qubits)`, `&&`) without the overhead of a fifth table for this
-data's size. A stricter 3NF read could argue for a junction table instead;
-the size/shape of this specific data is the reason this project didn't take
-that path. (The constraint uses `cardinality()`, not `array_length(..., 1)`:
-`array_length` of an empty array returns `NULL`, and a `CHECK` expression
-that evaluates to `NULL` — as opposed to `FALSE` — passes, so an
-`array_length`-based check silently let an empty `data_qubits` array through
-until a test caught it. `cardinality()` returns `0` for an empty array, so
-the comparison actually evaluates to `FALSE`.)
-
-**Decision — full truncate-then-reload, not upsert, inside the shared
-cross-source transaction.** Each call to `load_qasmbench_gold` does
-`TRUNCATE TABLE gold_qasmbench_circuit RESTART IDENTITY CASCADE` (which
-clears `gold_qasmbench_register`, `gold_qasmbench_stabilizer_check`, and
-`gold_qasmbench_conditional_correction` too, since they all reference the
-circuit table), then re-inserts every row. Unlike the design's first draft,
-this no longer opens its own connection/transaction — `run()` opens one
-connection, calls `_load_google`, `_load_syndromes`, then `_load_qasmbench`
-in sequence on it, and only commits once all three succeed (`conn.commit()`
-after the third call; any exception anywhere rolls back everything and the
-connection is closed in a `finally`). QASMBench's Gold slice is small
-(6 circuits, ~4 checks, ~6 corrections) and derived deterministically from
-an unchanged Bronze archive, so a full rebuild each run is simpler to reason
-about than a natural-key upsert and still satisfies "repeated runs on
-unchanged inputs must leave stable identifiers and must not add duplicate
-business records" — a rerun always lands on the same `circuit_id`s and row
-counts. This mirrors google_qec's own truncate-then-reload strategy exactly.
-
-**Cross-source isolation.** None of these four tables reference
-`google_qec` or `qec_syndromes` Gold tables. That decision, and the evidence
-for it, is already recorded below under "Rejected candidate relationship" —
-not repeated here.
+The Gold design for all three sources (tables, keys, constraints, design
+decisions and the all-or-nothing load) is in
+[reports/part1.md](../reports/part1.md), section 6. None of the QASMBench
+Gold tables reference the `google_qec` or `qec_syndromes` tables; the
+evidence is under "Rejected candidate relationship" below.
 
 ---
 
 ## Rejected candidate relationship
 
-*Stage: Gold (this decides whether to create a cross-source relationship in
-the relational model — Silver never joins sources at all).*
-
-**Candidate:** join `qasmbench`'s `small/error_correctiond3_n5/` circuit to
-the distance-3 `google_qec` experiments and/or the `d-3` `qec_syndromes`
-files, on the shared "distance 3" label in their names.
-
-**Evidence against:**
-- `qec_sm_n5.qasm` (same family as `error_correctiond3_n5`) declares
-  `qreg q[3]; qreg a[2]` — 5 qubits total, a repetition-code structure with a
-  2-bit syndrome register.
-- The distance-3 `google_qec` `properties.yml` reports `data_qubits: 9`,
-  `measure_qubits: 8` — 17 qubits, a surface-code structure with
-  `circuit_detectors: 200` detector bits over 25 rounds.
-- Different qubit counts and different code families under the same "distance
-  3" wording — per `brief.md`: "shared vocabulary does not create a shared
-  identifier."
-
-**Decision:** do not join QASMBench circuits to Google or syndrome
-experiments by distance value or any other name-based match. Keep QASMBench
-circuits as their own Gold entities, linked only to their own
-parity-check/correction structure — consistent with `brief.md`: "QASMBench
-cannot be joined row by row to the Google or simulated experiments... do not
-invent a match."
-
-Confirmed from the file itself: `error_correctiond3_n5.qasm` declares only
-`qreg q[5]; creg c[5];`, so it has 5 qubits and no separate ancilla or
-syndrome register. That is far from the 17-qubit distance-3 Google layout, so
-the rejection stands.
+We investigated joining the QASMBench circuits to the distance-3 Google
+experiments and the `d-3` syndrome files on the shared "distance 3" label,
+and rejected it. The evidence and decision are in
+[reports/part1.md](../reports/part1.md), section 7.
