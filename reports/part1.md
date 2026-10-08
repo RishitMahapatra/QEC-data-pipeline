@@ -223,6 +223,10 @@ rows = Gold rows):
 All Gold tables are in the PostgreSQL schema `gold`. Each table's row meaning
 is also stored in the database with  a a `COMMENT ON TABLE`, and every column has an inline comment.
 
+Here is the full-schema ER diagram illustrating the relationships between tables within each source. Notice that no relationships cross between different sources.
+
+![Gold schema ER diagram](gold_er_diagram.svg)
+
 ### 6.1 Tables and what one row represents
 
 | Table | One row represents | Rows |

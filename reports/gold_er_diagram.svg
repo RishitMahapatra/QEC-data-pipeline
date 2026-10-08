@@ -1,0 +1,319 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1520" height="1078" viewBox="0 0 1520 1078" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+<title>Gold schema ER diagram</title>
+<style>
+  .title { font-size: 13px; font-weight: 700; }
+  .key { font-size: 10px; font-weight: 700; fill: #6b7280; }
+  .pk { font-size: 12px; font-weight: 700; fill: #111827; text-decoration: underline; }
+  .fk { font-size: 12px; font-style: italic; fill: #111827; }
+  .col { font-size: 12px; fill: #111827; }
+  .type { font-size: 11px; fill: #6b7280; }
+  .edge { fill: none; stroke: #374151; stroke-width: 1.4; }
+  .card { font-size: 10px; fill: #374151; }
+  .band { font-size: 16px; font-weight: 700; }
+  .sub { font-size: 12px; fill: #6b7280; }
+  .legend { font-size: 12px; fill: #374151; }
+  .h1 { font-size: 20px; font-weight: 700; fill: #111827; }
+</style>
+<defs>
+  <marker id="one" viewBox="0 0 20 20" refX="20" refY="10" markerWidth="20" markerHeight="20" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+    <path d="M9,3 V17 M14,3 V17" stroke="#374151" stroke-width="1.4" fill="none"/>
+  </marker>
+  <marker id="zeroMany" viewBox="0 0 20 20" refX="20" refY="10" markerWidth="20" markerHeight="20" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+    <path d="M9,10 L20,2 M9,10 L20,18 M9,10 H20" stroke="#374151" stroke-width="1.4" fill="none"/>
+    <circle cx="4.5" cy="10" r="3.5" fill="#ffffff" stroke="#374151" stroke-width="1.4"/>
+  </marker>
+  <marker id="oneMany" viewBox="0 0 20 20" refX="20" refY="10" markerWidth="20" markerHeight="20" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+    <path d="M9,10 L20,2 M9,10 L20,18 M9,10 H20 M5,3 V17" stroke="#374151" stroke-width="1.4" fill="none"/>
+  </marker>
+</defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="20" y="40" class="h1">Gold schema — entity-relationship diagram</text>
+<rect x="20" y="70" width="1480" height="230" rx="10" fill="#f5f9ff" stroke="#1e40af" stroke-opacity="0.35" stroke-dasharray="6 4"/>
+<text x="36" y="94" class="band" fill="#1e40af">qec_syndromes</text>
+<text x="36" y="94" dx="136.8" class="sub">simulated surface-code syndromes, weighted by quantity</text>
+<rect x="40" y="114" width="300" height="154" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="1.4"/>
+<path d="M40,142 V120 a6,6 0 0 1 6,-6 H334 a6,6 0 0 1 6,6 V142 Z" fill="#dbeafe" stroke="#1e40af" stroke-width="1.4"/>
+<text x="190.0" y="133" text-anchor="middle" class="title" fill="#1e40af">gold_syndrome_experiment</text>
+<text x="48" y="156" class="key">PK</text>
+<text x="92" y="156" class="pk">experiment_id</text>
+<text x="332" y="156" text-anchor="end" class="type">text</text>
+<rect x="41" y="162" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="176" class="key"></text>
+<text x="92" y="176" class="col">code_family</text>
+<text x="332" y="176" text-anchor="end" class="type">text</text>
+<text x="48" y="196" class="key"></text>
+<text x="92" y="196" class="col">distance</text>
+<text x="332" y="196" text-anchor="end" class="type">int</text>
+<rect x="41" y="202" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="216" class="key"></text>
+<text x="92" y="216" class="col">physical_fault_rate</text>
+<text x="332" y="216" text-anchor="end" class="type">numeric</text>
+<text x="48" y="236" class="key"></text>
+<text x="92" y="236" class="col">round_count</text>
+<text x="332" y="236" text-anchor="end" class="type">int</text>
+<rect x="41" y="242" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="256" class="key"></text>
+<text x="92" y="256" class="col">check_count</text>
+<text x="332" y="256" text-anchor="end" class="type">int</text>
+<rect x="420" y="114" width="300" height="154" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="1.4"/>
+<path d="M420,142 V120 a6,6 0 0 1 6,-6 H714 a6,6 0 0 1 6,6 V142 Z" fill="#dbeafe" stroke="#1e40af" stroke-width="1.4"/>
+<text x="570.0" y="133" text-anchor="middle" class="title" fill="#1e40af">gold_syndrome_observation</text>
+<text x="428" y="156" class="key">PK</text>
+<text x="472" y="156" class="pk">observation_id</text>
+<text x="712" y="156" text-anchor="end" class="type">text</text>
+<rect x="421" y="162" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="176" class="key">FK UK</text>
+<text x="472" y="176" class="fk">experiment_id</text>
+<text x="712" y="176" text-anchor="end" class="type">text</text>
+<text x="428" y="196" class="key">FK UK</text>
+<text x="472" y="196" class="fk">syndrome_bits</text>
+<text x="712" y="196" text-anchor="end" class="type">bytea</text>
+<rect x="421" y="202" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="216" class="key">UK</text>
+<text x="472" y="216" class="col">logical_error_label</text>
+<text x="712" y="216" text-anchor="end" class="type">boolean</text>
+<text x="428" y="236" class="key"></text>
+<text x="472" y="236" class="col">quantity  (weight)</text>
+<text x="712" y="236" text-anchor="end" class="type">bigint</text>
+<rect x="421" y="242" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="256" class="key">UK</text>
+<text x="472" y="256" class="col">source_record_id</text>
+<text x="712" y="256" text-anchor="end" class="type">text</text>
+<rect x="800" y="114" width="300" height="74" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="1.4"/>
+<path d="M800,142 V120 a6,6 0 0 1 6,-6 H1094 a6,6 0 0 1 6,6 V142 Z" fill="#dbeafe" stroke="#1e40af" stroke-width="1.4"/>
+<text x="950.0" y="133" text-anchor="middle" class="title" fill="#1e40af">gold_syndrome_pattern</text>
+<text x="808" y="156" class="key">PK</text>
+<text x="852" y="156" class="pk">syndrome_bits</text>
+<text x="1092" y="156" text-anchor="end" class="type">bytea</text>
+<rect x="801" y="162" width="298" height="20" fill="#f6f7f9"/>
+<text x="808" y="176" class="key"></text>
+<text x="852" y="176" class="col">triggered_check_count</text>
+<text x="1092" y="176" text-anchor="end" class="type">int</text>
+<path d="M340,152.0 H380.0 V172.0 H420" class="edge" marker-start="url(#one)" marker-end="url(#zeroMany)"/>
+<text x="380.0" y="140.0" text-anchor="middle" class="card">1 : many</text>
+<path d="M800,152.0 H760.0 V192.0 H720" class="edge" marker-start="url(#one)" marker-end="url(#zeroMany)"/>
+<text x="760.0" y="140.0" text-anchor="middle" class="card">1 : many</text>
+<rect x="20" y="324" width="1480" height="310" rx="10" fill="#f5fdf7" stroke="#166534" stroke-opacity="0.35" stroke-dasharray="6 4"/>
+<text x="36" y="348" class="band" fill="#166534">google_qec</text>
+<text x="36" y="348" dx="108.0" class="sub">hardware surface-code experiments, shots and decoder predictions</text>
+<rect x="40" y="368" width="300" height="234" rx="6" fill="#ffffff" stroke="#166534" stroke-width="1.4"/>
+<path d="M40,396 V374 a6,6 0 0 1 6,-6 H334 a6,6 0 0 1 6,6 V396 Z" fill="#dcfce7" stroke="#166534" stroke-width="1.4"/>
+<text x="190.0" y="387" text-anchor="middle" class="title" fill="#166534">gold_google_experiment</text>
+<text x="48" y="410" class="key">PK</text>
+<text x="92" y="410" class="pk">experiment_id</text>
+<text x="332" y="410" text-anchor="end" class="type">text</text>
+<rect x="41" y="416" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="430" class="key">UK</text>
+<text x="92" y="430" class="col">source_record_id</text>
+<text x="332" y="430" text-anchor="end" class="type">text</text>
+<text x="48" y="450" class="key"></text>
+<text x="92" y="450" class="col">basis</text>
+<text x="332" y="450" text-anchor="end" class="type">text</text>
+<rect x="41" y="456" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="470" class="key"></text>
+<text x="92" y="470" class="col">code_family</text>
+<text x="332" y="470" text-anchor="end" class="type">text</text>
+<text x="48" y="490" class="key"></text>
+<text x="92" y="490" class="col">distance</text>
+<text x="332" y="490" text-anchor="end" class="type">int</text>
+<rect x="41" y="496" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="510" class="key"></text>
+<text x="92" y="510" class="col">rounds</text>
+<text x="332" y="510" text-anchor="end" class="type">int</text>
+<text x="48" y="530" class="key"></text>
+<text x="92" y="530" class="col">center_row</text>
+<text x="332" y="530" text-anchor="end" class="type">int</text>
+<rect x="41" y="536" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="550" class="key"></text>
+<text x="92" y="550" class="col">center_col</text>
+<text x="332" y="550" text-anchor="end" class="type">int</text>
+<text x="48" y="570" class="key"></text>
+<text x="92" y="570" class="col">measurement_count</text>
+<text x="332" y="570" text-anchor="end" class="type">int</text>
+<rect x="41" y="576" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="590" class="key"></text>
+<text x="92" y="590" class="col">detector_count</text>
+<text x="332" y="590" text-anchor="end" class="type">int</text>
+<rect x="420" y="368" width="300" height="234" rx="6" fill="#ffffff" stroke="#166534" stroke-width="1.4"/>
+<path d="M420,396 V374 a6,6 0 0 1 6,-6 H714 a6,6 0 0 1 6,6 V396 Z" fill="#dcfce7" stroke="#166534" stroke-width="1.4"/>
+<text x="570.0" y="387" text-anchor="middle" class="title" fill="#166534">gold_google_shot</text>
+<text x="428" y="410" class="key">PK FK</text>
+<text x="472" y="410" class="pk">experiment_id</text>
+<text x="712" y="410" text-anchor="end" class="type">text</text>
+<rect x="421" y="416" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="430" class="key">PK</text>
+<text x="472" y="430" class="pk">shot_index</text>
+<text x="712" y="430" text-anchor="end" class="type">int</text>
+<text x="428" y="450" class="key">FK</text>
+<text x="472" y="450" class="fk">measurement_count</text>
+<text x="712" y="450" text-anchor="end" class="type">int</text>
+<rect x="421" y="456" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="470" class="key">FK</text>
+<text x="472" y="470" class="fk">detector_count</text>
+<text x="712" y="470" text-anchor="end" class="type">int</text>
+<text x="428" y="490" class="key"></text>
+<text x="472" y="490" class="col">detector_bits</text>
+<text x="712" y="490" text-anchor="end" class="type">bytea</text>
+<rect x="421" y="496" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="510" class="key"></text>
+<text x="472" y="510" class="col">measurement_bits</text>
+<text x="712" y="510" text-anchor="end" class="type">bytea</text>
+<text x="428" y="530" class="key"></text>
+<text x="472" y="530" class="col">sweep_bits</text>
+<text x="712" y="530" text-anchor="end" class="type">bytea</text>
+<rect x="421" y="536" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="550" class="key"></text>
+<text x="472" y="550" class="col">detector_event_count</text>
+<text x="712" y="550" text-anchor="end" class="type">int</text>
+<text x="428" y="570" class="key"></text>
+<text x="472" y="570" class="col">actual_observable_flip</text>
+<text x="712" y="570" text-anchor="end" class="type">boolean</text>
+<rect x="421" y="576" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="590" class="key">UK</text>
+<text x="472" y="590" class="col">source_record_id</text>
+<text x="712" y="590" text-anchor="end" class="type">text</text>
+<rect x="800" y="368" width="300" height="134" rx="6" fill="#ffffff" stroke="#166534" stroke-width="1.4"/>
+<path d="M800,396 V374 a6,6 0 0 1 6,-6 H1094 a6,6 0 0 1 6,6 V396 Z" fill="#dcfce7" stroke="#166534" stroke-width="1.4"/>
+<text x="950.0" y="387" text-anchor="middle" class="title" fill="#166534">gold_google_decoder_prediction</text>
+<text x="808" y="410" class="key">PK FK</text>
+<text x="852" y="410" class="pk">experiment_id</text>
+<text x="1092" y="410" text-anchor="end" class="type">text</text>
+<rect x="801" y="416" width="298" height="20" fill="#f6f7f9"/>
+<text x="808" y="430" class="key">PK FK</text>
+<text x="852" y="430" class="pk">shot_index</text>
+<text x="1092" y="430" text-anchor="end" class="type">int</text>
+<text x="808" y="450" class="key">PK FK</text>
+<text x="852" y="450" class="pk">decoder_name</text>
+<text x="1092" y="450" text-anchor="end" class="type">text</text>
+<rect x="801" y="456" width="298" height="20" fill="#f6f7f9"/>
+<text x="808" y="470" class="key"></text>
+<text x="852" y="470" class="col">predicted_flip</text>
+<text x="1092" y="470" text-anchor="end" class="type">boolean</text>
+<text x="808" y="490" class="key"></text>
+<text x="852" y="490" class="col">was_wrong</text>
+<text x="1092" y="490" text-anchor="end" class="type">boolean</text>
+<rect x="1180" y="368" width="300" height="54" rx="6" fill="#ffffff" stroke="#166534" stroke-width="1.4"/>
+<path d="M1180,396 V374 a6,6 0 0 1 6,-6 H1474 a6,6 0 0 1 6,6 V396 Z" fill="#dcfce7" stroke="#166534" stroke-width="1.4"/>
+<text x="1330.0" y="387" text-anchor="middle" class="title" fill="#166534">gold_google_decoder</text>
+<text x="1188" y="410" class="key">PK</text>
+<text x="1232" y="410" class="pk">decoder_name</text>
+<text x="1472" y="410" text-anchor="end" class="type">text</text>
+<path d="M340,406.0 H420" class="edge" marker-start="url(#one)" marker-end="url(#zeroMany)"/>
+<text x="380.0" y="394.0" text-anchor="middle" class="card">1 : 50,000</text>
+<path d="M720,406.0 H800" class="edge" marker-start="url(#one)" marker-end="url(#oneMany)"/>
+<text x="760.0" y="394.0" text-anchor="middle" class="card">1 : 4</text>
+<path d="M1180,406.0 H1140.0 V446.0 H1100" class="edge" marker-start="url(#one)" marker-end="url(#zeroMany)"/>
+<text x="1140.0" y="394.0" text-anchor="middle" class="card">1 : 250,000</text>
+<rect x="20" y="658" width="1480" height="300" rx="10" fill="#fffbf0" stroke="#92400e" stroke-opacity="0.35" stroke-dasharray="6 4"/>
+<text x="36" y="682" class="band" fill="#92400e">qasmbench</text>
+<text x="36" y="682" dx="98.39999999999999" class="sub">parsed OpenQASM circuit definitions (no shots)</text>
+<rect x="40" y="702" width="300" height="214" rx="6" fill="#ffffff" stroke="#92400e" stroke-width="1.4"/>
+<path d="M40,730 V708 a6,6 0 0 1 6,-6 H334 a6,6 0 0 1 6,6 V730 Z" fill="#fef3c7" stroke="#92400e" stroke-width="1.4"/>
+<text x="190.0" y="721" text-anchor="middle" class="title" fill="#92400e">gold_qasmbench_circuit</text>
+<text x="48" y="744" class="key">PK</text>
+<text x="92" y="744" class="pk">circuit_id</text>
+<text x="332" y="744" text-anchor="end" class="type">text</text>
+<rect x="41" y="750" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="764" class="key">UK</text>
+<text x="92" y="764" class="col">source_record_id</text>
+<text x="332" y="764" text-anchor="end" class="type">text</text>
+<text x="48" y="784" class="key">UK</text>
+<text x="92" y="784" class="col">benchmark_name</text>
+<text x="332" y="784" text-anchor="end" class="type">text</text>
+<rect x="41" y="790" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="804" class="key">UK</text>
+<text x="92" y="804" class="col">variant</text>
+<text x="332" y="804" text-anchor="end" class="type">text</text>
+<text x="48" y="824" class="key"></text>
+<text x="92" y="824" class="col">qubit_count</text>
+<text x="332" y="824" text-anchor="end" class="type">int</text>
+<rect x="41" y="830" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="844" class="key"></text>
+<text x="92" y="844" class="col">measurement_count</text>
+<text x="332" y="844" text-anchor="end" class="type">int</text>
+<text x="48" y="864" class="key"></text>
+<text x="92" y="864" class="col">two_qubit_gate_count</text>
+<text x="332" y="864" text-anchor="end" class="type">int</text>
+<rect x="41" y="870" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="884" class="key"></text>
+<text x="92" y="884" class="col">code_family  (nullable)</text>
+<text x="332" y="884" text-anchor="end" class="type">text</text>
+<text x="48" y="904" class="key"></text>
+<text x="92" y="904" class="col">distance  (nullable)</text>
+<text x="332" y="904" text-anchor="end" class="type">int</text>
+<rect x="420" y="772" width="300" height="114" rx="6" fill="#ffffff" stroke="#92400e" stroke-width="1.4"/>
+<path d="M420,800 V778 a6,6 0 0 1 6,-6 H714 a6,6 0 0 1 6,6 V800 Z" fill="#fef3c7" stroke="#92400e" stroke-width="1.4"/>
+<text x="570.0" y="791" text-anchor="middle" class="title" fill="#92400e">gold_qasmbench_register</text>
+<text x="428" y="814" class="key">PK FK</text>
+<text x="472" y="814" class="pk">circuit_id</text>
+<text x="712" y="814" text-anchor="end" class="type">text</text>
+<rect x="421" y="820" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="834" class="key">PK</text>
+<text x="472" y="834" class="pk">register_kind</text>
+<text x="712" y="834" text-anchor="end" class="type">text</text>
+<text x="428" y="854" class="key">PK</text>
+<text x="472" y="854" class="pk">register_name</text>
+<text x="712" y="854" text-anchor="end" class="type">text</text>
+<rect x="421" y="860" width="298" height="20" fill="#f6f7f9"/>
+<text x="428" y="874" class="key"></text>
+<text x="472" y="874" class="col">register_size</text>
+<text x="712" y="874" text-anchor="end" class="type">int</text>
+<rect x="800" y="772" width="300" height="154" rx="6" fill="#ffffff" stroke="#92400e" stroke-width="1.4"/>
+<path d="M800,800 V778 a6,6 0 0 1 6,-6 H1094 a6,6 0 0 1 6,6 V800 Z" fill="#fef3c7" stroke="#92400e" stroke-width="1.4"/>
+<text x="950.0" y="791" text-anchor="middle" class="title" fill="#92400e">gold_qasmbench_stabilizer_check</text>
+<text x="808" y="814" class="key">PK</text>
+<text x="852" y="814" class="pk">source_record_id</text>
+<text x="1092" y="814" text-anchor="end" class="type">text</text>
+<rect x="801" y="820" width="298" height="20" fill="#f6f7f9"/>
+<text x="808" y="834" class="key">FK UK</text>
+<text x="852" y="834" class="fk">circuit_id</text>
+<text x="1092" y="834" text-anchor="end" class="type">text</text>
+<text x="808" y="854" class="key">UK</text>
+<text x="852" y="854" class="col">check_id</text>
+<text x="1092" y="854" text-anchor="end" class="type">text</text>
+<rect x="801" y="860" width="298" height="20" fill="#f6f7f9"/>
+<text x="808" y="874" class="key"></text>
+<text x="852" y="874" class="col">ancilla_qubit</text>
+<text x="1092" y="874" text-anchor="end" class="type">text</text>
+<text x="808" y="894" class="key"></text>
+<text x="852" y="894" class="col">data_qubits</text>
+<text x="1092" y="894" text-anchor="end" class="type">text[]</text>
+<rect x="801" y="900" width="298" height="20" fill="#f6f7f9"/>
+<text x="808" y="914" class="key"></text>
+<text x="852" y="914" class="col">syndrome_bit</text>
+<text x="1092" y="914" text-anchor="end" class="type">text</text>
+<rect x="1180" y="772" width="300" height="154" rx="6" fill="#ffffff" stroke="#92400e" stroke-width="1.4"/>
+<path d="M1180,800 V778 a6,6 0 0 1 6,-6 H1474 a6,6 0 0 1 6,6 V800 Z" fill="#fef3c7" stroke="#92400e" stroke-width="1.4"/>
+<text x="1330.0" y="791" text-anchor="middle" class="title" fill="#92400e">gold_qasmbench_conditional_correction</text>
+<text x="1188" y="814" class="key">PK</text>
+<text x="1232" y="814" class="pk">source_record_id</text>
+<text x="1472" y="814" text-anchor="end" class="type">text</text>
+<rect x="1181" y="820" width="298" height="20" fill="#f6f7f9"/>
+<text x="1188" y="834" class="key">FK</text>
+<text x="1232" y="834" class="fk">circuit_id</text>
+<text x="1472" y="834" text-anchor="end" class="type">text</text>
+<text x="1188" y="854" class="key"></text>
+<text x="1232" y="854" class="col">condition_register</text>
+<text x="1472" y="854" text-anchor="end" class="type">text</text>
+<rect x="1181" y="860" width="298" height="20" fill="#f6f7f9"/>
+<text x="1188" y="874" class="key"></text>
+<text x="1232" y="874" class="col">condition_value</text>
+<text x="1472" y="874" text-anchor="end" class="type">bigint</text>
+<text x="1188" y="894" class="key"></text>
+<text x="1232" y="894" class="col">gate</text>
+<text x="1472" y="894" text-anchor="end" class="type">text</text>
+<rect x="1181" y="900" width="298" height="20" fill="#f6f7f9"/>
+<text x="1188" y="914" class="key"></text>
+<text x="1232" y="914" class="col">target_qubit</text>
+<text x="1472" y="914" text-anchor="end" class="type">text</text>
+<path d="M340,716.0 H570.0 V772" class="edge" marker-start="url(#one)" marker-end="url(#oneMany)"/>
+<text x="578.0" y="758" class="card">1 : 1..many</text>
+<path d="M340,716.0 H950.0 V772" class="edge" marker-start="url(#one)" marker-end="url(#zeroMany)"/>
+<text x="958.0" y="758" class="card">1 : 0..many</text>
+<path d="M340,716.0 H1330.0 V772" class="edge" marker-start="url(#one)" marker-end="url(#zeroMany)"/>
+<text x="1338.0" y="758" class="card">1 : 0..many</text>
+<text x="36" y="988" class="legend" xml:space="preserve">PK primary key   FK foreign key   UK part of a UNIQUE constraint   (each box = one Gold table in schema gold)</text>
+<text x="36" y="1008" class="legend" xml:space="preserve">Crow&#x27;s foot notation:  ||  exactly one     o&lt;  zero or many     |&lt;  one or many</text>
+<text x="36" y="1028" class="legend" xml:space="preserve">gold_google_shot -&gt; gold_google_experiment is a composite FK on (experiment_id, measurement_count, detector_count).</text>
+<text x="36" y="1048" class="legend" xml:space="preserve">No relationship crosses between the three sources: they share vocabulary (code_family, distance), not identifiers.</text>
+</svg>
