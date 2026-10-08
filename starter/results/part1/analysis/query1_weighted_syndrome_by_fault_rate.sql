@@ -41,5 +41,4 @@ ORDER BY e.physical_fault_rate, o.logical_error_label;
 -- assignment brief. As physical_fault_rate increases, the weighted share of
 -- logical_error_label = true rises steadily, from 0.02% at 0.00001 to 18.7%
 -- at 0.01: roughly in proportion to the fault rate at the lower rates, and
--- more slowly at the highest rates. This is an association observed in the
--- data, not a causal claim.
+-- more slowly at the highest rates.
