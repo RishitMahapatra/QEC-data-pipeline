@@ -1,0 +1,182 @@
+{
+  "build_ml_tables": {
+    "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+    "data_release": "quantum-data-core v3 (2026-08-05)",
+    "finished_at": "2026-10-06T18:43:09.083589+00:00",
+    "input_views": [
+      "v_ml_syndrome_decoder_example",
+      "v_ml_google_decoder_example"
+    ],
+    "output_hashes": {
+      "ml/ml_google_decoder_example.parquet": "73ddcd005cd1c71df2acccd4799f0b7007593c9c6b313d5181a5e5fa7e7b24a9",
+      "ml/ml_syndrome_decoder_example.parquet": "bc89a69b34a49e33d3e903cf48f0faa26c286c343bb09376cc787104e2ec56bf"
+    },
+    "output_row_counts": {
+      "ml/ml_google_decoder_example.parquet": 250000,
+      "ml/ml_syndrome_decoder_example.parquet": 75598,
+      "results/part1/analysis/query1_weighted_syndrome_by_fault_rate_result.csv": 14,
+      "results/part1/analysis/query2_google_decoder_error_by_distance_and_location_result.csv": 20,
+      "results/part1/analysis/query3_qasmbench_circuit_mapping_result.csv": 12
+    },
+    "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+    "split_counts": {
+      "ml/ml_google_decoder_example.parquet": {
+        "test": 125000,
+        "train": 100000,
+        "validation": 25000
+      },
+      "ml/ml_syndrome_decoder_example.parquet": {
+        "test": 20887,
+        "train": 53304,
+        "validation": 1407
+      }
+    },
+    "started_at": "2026-10-06T18:43:05.909484+00:00"
+  },
+  "load_postgres": {
+    "google_qec": {
+      "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+      "finished_at": "2026-10-06T18:43:05.904050+00:00",
+      "input_hashes": {
+        "silver/google_qec/experiment.parquet": "8c35a6aba65fbb890af53c7285e0f87d33758cd54f806e1bdfd58bf0138fef62",
+        "silver/google_qec/shot.parquet": "f8663f9d4a97f4c845f77cc3c372dc97c7413651840177479def86cd4c1fafee"
+      },
+      "output_row_counts": {
+        "gold_google_decoder_prediction": 1000000,
+        "gold_google_experiment": 5,
+        "gold_google_shot": 250000
+      },
+      "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+      "started_at": "2026-10-06T18:42:44.705480+00:00"
+    },
+    "qasmbench": {
+      "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+      "finished_at": "2026-10-06T18:43:05.904050+00:00",
+      "input_hashes": {
+        "silver/qasmbench/circuit.parquet": "3f9e8f944d7d78dc1c5313eff11c50b056303fc61bd9af204a1974eadfaf9177",
+        "silver/qasmbench/conditional_correction.parquet": "bfbe742ed8bdeeda6457c4bb304f7637aca4207a61fc4116f1c841902f610d41",
+        "silver/qasmbench/stabilizer_check.parquet": "f7af11faf5d153217e11a883ed18661659ef135038090e211360007a986d74dc"
+      },
+      "output_row_counts": {
+        "gold_qasmbench_circuit": 6,
+        "gold_qasmbench_conditional_correction": 6,
+        "gold_qasmbench_register": 16,
+        "gold_qasmbench_stabilizer_check": 4
+      },
+      "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+      "started_at": "2026-10-06T18:42:44.705480+00:00"
+    },
+    "qec_syndromes": {
+      "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+      "finished_at": "2026-10-06T18:43:05.904050+00:00",
+      "input_hash": "0e8e43390ec13b79d37e24d28ce4fb9cd4e92cd12f6eea6e8be46a427cd44680",
+      "output_row_counts": {
+        "gold_syndrome_experiment": 7,
+        "gold_syndrome_observation": 75598,
+        "gold_syndrome_pattern": 31941
+      },
+      "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+      "started_at": "2026-10-06T18:42:44.705480+00:00"
+    }
+  },
+  "pipeline": {
+    "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+    "finished_at": "2026-10-06T18:43:09.617322+00:00",
+    "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+    "stages": [
+      {
+        "seconds": 0.1,
+        "stage": "register_sources"
+      },
+      {
+        "seconds": 4.6,
+        "stage": "prepare_data"
+      },
+      {
+        "seconds": 21.2,
+        "stage": "load_postgres"
+      },
+      {
+        "seconds": 3.3,
+        "stage": "build_ml_tables"
+      },
+      {
+        "seconds": 0.4,
+        "stage": "trace_examples"
+      }
+    ],
+    "started_at": "2026-10-06T18:42:39.848196+00:00"
+  },
+  "prepare_data": {
+    "google_qec": {
+      "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+      "finished_at": "2026-10-06T18:42:44.698192+00:00",
+      "input_hashes": {
+        "google_qec": "5d6a24f89f055883a49910979490be4baef54d28bf9a0f8e096a1d6c46d1ea56"
+      },
+      "output_row_counts": {
+        "results/part1/data_issues.parquet (google_qec rows)": 0,
+        "results/part1/source_trace.parquet (google_qec rows)": 2000005,
+        "silver/google_qec/experiment.parquet": 5,
+        "silver/google_qec/shot.parquet": 250000
+      },
+      "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+      "started_at": "2026-10-06T18:42:40.071733+00:00"
+    },
+    "qasmbench": {
+      "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+      "finished_at": "2026-10-06T18:42:44.696874+00:00",
+      "input_hashes": {
+        "qasmbench": "60307f88e34b1f752b94223d6d136da72c629b4b625ac6d1c30e5e2e4f85722a"
+      },
+      "output_row_counts": {
+        "results/part1/data_issues.parquet (qasmbench rows)": 0,
+        "results/part1/source_trace.parquet (qasmbench rows)": 16,
+        "silver/qasmbench/circuit.parquet": 6,
+        "silver/qasmbench/conditional_correction.parquet": 6,
+        "silver/qasmbench/stabilizer_check.parquet": 4
+      },
+      "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+      "started_at": "2026-10-06T18:42:44.139792+00:00"
+    },
+    "qec_syndromes": {
+      "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+      "finished_at": "2026-10-06T18:42:44.698192+00:00",
+      "input_hashes": {
+        "qec_syndromes": "bdfce36a71f04295ac78fb372d9c2e381801c05e3be119f919750ef59026d072"
+      },
+      "output_row_counts": {
+        "results/part1/data_issues.parquet (qec_syndromes rows)": 0,
+        "results/part1/source_trace.parquet (qec_syndromes rows)": 75598,
+        "silver/qec_syndromes/syndrome_observation.parquet": 75598
+      },
+      "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+      "started_at": "2026-10-06T18:42:40.071733+00:00"
+    }
+  },
+  "register_sources": {
+    "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+    "finished_at": "2026-10-06T18:42:40.068875+00:00",
+    "input_count": 3,
+    "input_hashes": {
+      "google_qec": "5d6a24f89f055883a49910979490be4baef54d28bf9a0f8e096a1d6c46d1ea56",
+      "qasmbench": "60307f88e34b1f752b94223d6d136da72c629b4b625ac6d1c30e5e2e4f85722a",
+      "qec_syndromes": "bdfce36a71f04295ac78fb372d9c2e381801c05e3be119f919750ef59026d072"
+    },
+    "issue_count": 0,
+    "output_count": 3,
+    "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+    "started_at": "2026-10-06T18:42:40.020498+00:00",
+    "unexpected_bronze_objects": []
+  },
+  "trace_examples": {
+    "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+    "finished_at": "2026-10-06T18:43:09.614276+00:00",
+    "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
+    "started_at": "2026-10-06T18:43:09.192480+00:00",
+    "traced_example_ids": {
+      "ml_google_decoder_example": "75f380e1bb46b4eaddabdc73f2bbbc1e",
+      "ml_syndrome_decoder_example": "c18184e7f89343e21bd27ff65b57b93f"
+    }
+  }
+}

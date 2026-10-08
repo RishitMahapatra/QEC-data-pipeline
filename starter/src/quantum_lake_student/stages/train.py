@@ -779,6 +779,7 @@ def run_task_c(table: pa.Table) -> TaskResult:
     )
 
     model_metrics: dict[str, dict] = {}
+    train_fit: dict = {}
     for split in MODEL_SPLITS:
         data = splits[split]
         started = time.perf_counter()
@@ -788,6 +789,13 @@ def run_task_c(table: pa.Table) -> TaskResult:
         result.predictions.append(
             prediction_table(TASK_C, MLP_MODEL_ID, split, data, prediction, probability)
         )
+        if split == "train":
+            # Only reported next to the test numbers to show over-fitting; no choice is made on it.
+            train_metrics = evaluate(data, prediction, probability)
+            train_fit = {
+                "logical_error_rate": train_metrics["logical_error_rate"],
+                "brier_score": train_metrics["brier_score"],
+            }
         if split == "test":
             model_metrics[MLP_MODEL_ID] = {
                 **evaluate(data, prediction, probability),
@@ -800,6 +808,7 @@ def run_task_c(table: pa.Table) -> TaskResult:
         "test_shots": len(test.example_id),
         "flip_share": {split: weighted_error_share(splits[split]) for split in MODEL_SPLITS},
         "models": model_metrics,
+        "train_fit": train_fit,
     }
     result.models = {MLP_MODEL_ID: mlp}
     result.run_info = {
@@ -1011,6 +1020,7 @@ def task_c_report(task_c: TaskResult) -> str:
     metrics, info = task_c.metrics, task_c.run_info
     m = metrics["models"][MLP_MODEL_ID]
     share = metrics["flip_share"]
+    fit = metrics["train_fit"]
     threshold = info["threshold"]
     return f"""## Task C: bounded raw-detector prototype
 
@@ -1042,6 +1052,21 @@ was chosen on validation only ({threshold['rule']}).
 | Model | Logical-error rate | Balanced accuracy | Brier score | Train s | Predict s |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `{MLP_MODEL_ID}` | {_fmt(m['logical_error_rate'])} | {_fmt(m['balanced_accuracy'])} | {_fmt(m['brier_score'])} | {m['training_seconds']:.4f} | {m['prediction_seconds']:.4f} |
+
+**Interpretation and limitations.** A logical-error rate of
+{_fmt(m['logical_error_rate'])} on test, where {share['test']:.1%} of shots
+flip, means the MLP does no better than guessing. Its Brier score
+({_fmt(m['brier_score'])}) is worse than the 0.25 of always predicting 50%, so
+its probabilities are confidently wrong. On its own training rows it reaches a
+logical-error rate of {_fmt(fit['logical_error_rate'])} and a Brier score of
+{_fmt(fit['brier_score'])}: it has memorised the
+{info['split_rows']['train']:,} training shots instead of learning a rule that
+carries over to new shots. The training loop also stops at
+`max_iter={info['model']['params']['max_iter']}`, so it may end before fully
+converging. We keep this result as it is: the task is a bounded
+pipeline-consumer check, and tuning the model is outside its scope. The
+supplied decoders, which use the layout of the code, do clearly better on
+distance-three test shots (Task B).
 
 **What the flat 200-bit vector hides.** Each bit's position in the vector is
 arbitrary to the model: it has no notion of which detector is physically

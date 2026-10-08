@@ -1,0 +1,441 @@
+{
+  "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+  "data_release": "quantum-data-core v3 (2026-08-05)",
+  "dependencies": {
+    "numpy": "2.5.3",
+    "pyarrow": "20.0.0",
+    "python": "3.12.10",
+    "scikit-learn": "1.9.0",
+    "scipy": "1.18.1"
+  },
+  "finished_at": "2026-10-06T19:13:55.540531+00:00",
+  "input_hashes": {
+    "ml/ml_google_decoder_example.parquet": "73ddcd005cd1c71df2acccd4799f0b7007593c9c6b313d5181a5e5fa7e7b24a9",
+    "ml/ml_syndrome_decoder_example.parquet": "bc89a69b34a49e33d3e903cf48f0faa26c286c343bb09376cc787104e2ec56bf"
+  },
+  "model_files": {
+    "models/task_a_weighted_logistic_regression.pkl": "a4af08a069b18471f337bcce66d8237f1f51f70e4b2a0325ebc315fc1563df15",
+    "models/task_a_weighted_prior.pkl": "40173afd650e67d4b5ad8a5b92f484cde509ca9ccda721b49201bd33bf34347d",
+    "models/task_b_d3_combined_logistic.pkl": "f02e15ffbfc712d7cf6331c1b4925591c6cbc8bf2d8b4814311de8a635a502e3",
+    "models/task_b_d3_prior.pkl": "642c55c7b9e2eae6525b98d378abe919615c5d169ed2150cadd730b2fbe37957",
+    "models/task_b_d5_combined_logistic.pkl": "cbdc2e19ad654ad793508fcf744550045c7bc4dbf024054280a1b8f4b8a9de48",
+    "models/task_b_d5_prior.pkl": "af61cf90768c2695c204041849d7079784c47b1caec5de66c4f0c8c44a9fdeeb",
+    "models/task_c_raw_detector_mlp.pkl": "46dae21fdc6b0e82b3dc82b4df3e90afa3f291542199fee1355ef7c5680b92c3"
+  },
+  "random_seed": 4000,
+  "run_id": "e48012b3-b01c-414f-af6f-bf7ead861ad7",
+  "started_at": "2026-10-06T19:13:45.727794+00:00",
+  "task_a_syndrome": {
+    "feature_helper": "quantum_lake_student.ml.syndrome_model_input",
+    "feature_order": [
+      "round0_check0",
+      "round0_check1",
+      "round0_check2",
+      "round0_check3",
+      "round1_check0",
+      "round1_check1",
+      "round1_check2",
+      "round1_check3",
+      "round2_check0",
+      "round2_check1",
+      "round2_check2",
+      "round2_check3",
+      "round3_check0",
+      "round3_check1",
+      "round3_check2",
+      "round3_check3"
+    ],
+    "input_table": "ml/ml_syndrome_decoder_example.parquet",
+    "models": {
+      "task_a_weighted_logistic_regression": {
+        "class": "sklearn.linear_model.LogisticRegression",
+        "coefficients": {
+          "round0_check0": 1.7338609676657855,
+          "round0_check1": -0.16444390525946917,
+          "round0_check2": 2.28772755589426,
+          "round0_check3": -0.014907876353332574,
+          "round1_check0": 0.7380113740960873,
+          "round1_check1": 0.38230015520096183,
+          "round1_check2": 1.0612002922591224,
+          "round1_check3": 0.40530683926977157,
+          "round2_check0": 0.8880103161337692,
+          "round2_check1": 0.28190859293879944,
+          "round2_check2": 1.2820447172357572,
+          "round2_check3": 0.28787656504539855,
+          "round3_check0": 1.5598216358484525,
+          "round3_check1": 0.11693174221260853,
+          "round3_check2": 1.5030041568998078,
+          "round3_check3": 0.17724916739853186
+        },
+        "intercept": -4.032490896395062,
+        "iterations": 13,
+        "params": {
+          "max_iter": 1000,
+          "random_state": 4000
+        }
+      },
+      "task_a_weighted_prior": {
+        "class": "sklearn.dummy.DummyClassifier",
+        "learned_error_prior": 0.04258168,
+        "params": {
+          "strategy": "prior"
+        }
+      }
+    },
+    "split_physical_shots": {
+      "test": 10000000,
+      "train": 50000000,
+      "validation": 10000000
+    },
+    "split_rows": {
+      "test": 20887,
+      "train": 53304,
+      "validation": 1407
+    },
+    "split_rule": "data_split column from Part I (syndrome_data_split): validation = fault rate 0.0005, test = 0.005, train = the other five",
+    "target": "logical_error_label",
+    "threshold": {
+      "chosen_on": "validation",
+      "rule": "lowest weighted logical-error rate over 0.01..0.99, tie -> closest to 0.5",
+      "validation_logical_error_rate": 0.0114403,
+      "value": 0.93
+    },
+    "timings_seconds": {
+      "task_a_weighted_logistic_regression": {
+        "prediction_seconds": 0.00021445902530103922,
+        "training_seconds": 0.0813606670126319
+      },
+      "task_a_weighted_prior": {
+        "prediction_seconds": 0.00022954202722758055,
+        "training_seconds": 0.0034497920132707804
+      }
+    },
+    "weights": "sample_weight used in fitting both models and in every metric"
+  },
+  "task_b_google": {
+    "distances": {
+      "distance_3": {
+        "detector_count": 200,
+        "models": {
+          "task_b_d3_combined_logistic": {
+            "class": "sklearn.linear_model.LogisticRegression",
+            "coefficients": {
+              "belief_matching_prediction": 0.38395710851723536,
+              "correlated_matching_prediction": 0.287874848663849,
+              "detector_event_density": 0.37551819740596803,
+              "pymatching_prediction": 0.17367016144383207,
+              "tensor_network_contraction_prediction": 0.5305756392944586
+            },
+            "intercept": -0.7617776780690944,
+            "iterations": 14,
+            "params": {
+              "max_iter": 1000,
+              "random_state": 4000
+            }
+          },
+          "task_b_d3_prior": {
+            "class": "sklearn.dummy.DummyClassifier",
+            "learned_flip_prior": 0.4916375,
+            "params": {
+              "strategy": "prior"
+            }
+          }
+        },
+        "split_rows": {
+          "test": 100000,
+          "train": 80000,
+          "validation": 20000
+        },
+        "threshold": {
+          "chosen_on": "validation",
+          "rule": "lowest logical-error rate over 0.01..0.99, tie -> closest to 0.5",
+          "validation_logical_error_rate": 0.39205,
+          "value": 0.51
+        }
+      },
+      "distance_5": {
+        "detector_count": 600,
+        "models": {
+          "task_b_d5_combined_logistic": {
+            "class": "sklearn.linear_model.LogisticRegression",
+            "coefficients": {
+              "belief_matching_prediction": 0.38432704577567434,
+              "correlated_matching_prediction": 0.2550590341901269,
+              "detector_event_density": 1.0981020578982228,
+              "pymatching_prediction": 0.22252815236760087,
+              "tensor_network_contraction_prediction": 0.5903983327313392
+            },
+            "intercept": -0.9046910408021303,
+            "iterations": 15,
+            "params": {
+              "max_iter": 1000,
+              "random_state": 4000
+            }
+          },
+          "task_b_d5_prior": {
+            "class": "sklearn.dummy.DummyClassifier",
+            "learned_flip_prior": 0.4988,
+            "params": {
+              "strategy": "prior"
+            }
+          }
+        },
+        "split_rows": {
+          "test": 25000,
+          "train": 20000,
+          "validation": 5000
+        },
+        "threshold": {
+          "chosen_on": "validation",
+          "rule": "lowest logical-error rate over 0.01..0.99, tie -> closest to 0.5",
+          "validation_logical_error_rate": 0.3894,
+          "value": 0.55
+        }
+      }
+    },
+    "distances_kept_separate": true,
+    "feature_helper": "quantum_lake_student.ml.google_meta_model_input",
+    "feature_order": [
+      "detector_event_density",
+      "belief_matching_prediction",
+      "correlated_matching_prediction",
+      "pymatching_prediction",
+      "tensor_network_contraction_prediction"
+    ],
+    "input_table": "ml/ml_google_decoder_example.parquet",
+    "split_rule": "data_split column from Part I (google_data_split): odd shot_index = test, shot_index % 10 == 8 = validation, other even = train",
+    "target": "actual_observable_flip",
+    "weights": "none: every row is one hardware shot"
+  },
+  "task_c_raw_detector": {
+    "feature_helper": "quantum_lake_student.stages.train.unpack_detector_matrix (numpy.unpackbits, bitorder='little'; no course-supplied helper covers this task)",
+    "feature_order": [
+      "detector_bit_0",
+      "detector_bit_1",
+      "detector_bit_2",
+      "detector_bit_3",
+      "detector_bit_4",
+      "detector_bit_5",
+      "detector_bit_6",
+      "detector_bit_7",
+      "detector_bit_8",
+      "detector_bit_9",
+      "detector_bit_10",
+      "detector_bit_11",
+      "detector_bit_12",
+      "detector_bit_13",
+      "detector_bit_14",
+      "detector_bit_15",
+      "detector_bit_16",
+      "detector_bit_17",
+      "detector_bit_18",
+      "detector_bit_19",
+      "detector_bit_20",
+      "detector_bit_21",
+      "detector_bit_22",
+      "detector_bit_23",
+      "detector_bit_24",
+      "detector_bit_25",
+      "detector_bit_26",
+      "detector_bit_27",
+      "detector_bit_28",
+      "detector_bit_29",
+      "detector_bit_30",
+      "detector_bit_31",
+      "detector_bit_32",
+      "detector_bit_33",
+      "detector_bit_34",
+      "detector_bit_35",
+      "detector_bit_36",
+      "detector_bit_37",
+      "detector_bit_38",
+      "detector_bit_39",
+      "detector_bit_40",
+      "detector_bit_41",
+      "detector_bit_42",
+      "detector_bit_43",
+      "detector_bit_44",
+      "detector_bit_45",
+      "detector_bit_46",
+      "detector_bit_47",
+      "detector_bit_48",
+      "detector_bit_49",
+      "detector_bit_50",
+      "detector_bit_51",
+      "detector_bit_52",
+      "detector_bit_53",
+      "detector_bit_54",
+      "detector_bit_55",
+      "detector_bit_56",
+      "detector_bit_57",
+      "detector_bit_58",
+      "detector_bit_59",
+      "detector_bit_60",
+      "detector_bit_61",
+      "detector_bit_62",
+      "detector_bit_63",
+      "detector_bit_64",
+      "detector_bit_65",
+      "detector_bit_66",
+      "detector_bit_67",
+      "detector_bit_68",
+      "detector_bit_69",
+      "detector_bit_70",
+      "detector_bit_71",
+      "detector_bit_72",
+      "detector_bit_73",
+      "detector_bit_74",
+      "detector_bit_75",
+      "detector_bit_76",
+      "detector_bit_77",
+      "detector_bit_78",
+      "detector_bit_79",
+      "detector_bit_80",
+      "detector_bit_81",
+      "detector_bit_82",
+      "detector_bit_83",
+      "detector_bit_84",
+      "detector_bit_85",
+      "detector_bit_86",
+      "detector_bit_87",
+      "detector_bit_88",
+      "detector_bit_89",
+      "detector_bit_90",
+      "detector_bit_91",
+      "detector_bit_92",
+      "detector_bit_93",
+      "detector_bit_94",
+      "detector_bit_95",
+      "detector_bit_96",
+      "detector_bit_97",
+      "detector_bit_98",
+      "detector_bit_99",
+      "detector_bit_100",
+      "detector_bit_101",
+      "detector_bit_102",
+      "detector_bit_103",
+      "detector_bit_104",
+      "detector_bit_105",
+      "detector_bit_106",
+      "detector_bit_107",
+      "detector_bit_108",
+      "detector_bit_109",
+      "detector_bit_110",
+      "detector_bit_111",
+      "detector_bit_112",
+      "detector_bit_113",
+      "detector_bit_114",
+      "detector_bit_115",
+      "detector_bit_116",
+      "detector_bit_117",
+      "detector_bit_118",
+      "detector_bit_119",
+      "detector_bit_120",
+      "detector_bit_121",
+      "detector_bit_122",
+      "detector_bit_123",
+      "detector_bit_124",
+      "detector_bit_125",
+      "detector_bit_126",
+      "detector_bit_127",
+      "detector_bit_128",
+      "detector_bit_129",
+      "detector_bit_130",
+      "detector_bit_131",
+      "detector_bit_132",
+      "detector_bit_133",
+      "detector_bit_134",
+      "detector_bit_135",
+      "detector_bit_136",
+      "detector_bit_137",
+      "detector_bit_138",
+      "detector_bit_139",
+      "detector_bit_140",
+      "detector_bit_141",
+      "detector_bit_142",
+      "detector_bit_143",
+      "detector_bit_144",
+      "detector_bit_145",
+      "detector_bit_146",
+      "detector_bit_147",
+      "detector_bit_148",
+      "detector_bit_149",
+      "detector_bit_150",
+      "detector_bit_151",
+      "detector_bit_152",
+      "detector_bit_153",
+      "detector_bit_154",
+      "detector_bit_155",
+      "detector_bit_156",
+      "detector_bit_157",
+      "detector_bit_158",
+      "detector_bit_159",
+      "detector_bit_160",
+      "detector_bit_161",
+      "detector_bit_162",
+      "detector_bit_163",
+      "detector_bit_164",
+      "detector_bit_165",
+      "detector_bit_166",
+      "detector_bit_167",
+      "detector_bit_168",
+      "detector_bit_169",
+      "detector_bit_170",
+      "detector_bit_171",
+      "detector_bit_172",
+      "detector_bit_173",
+      "detector_bit_174",
+      "detector_bit_175",
+      "detector_bit_176",
+      "detector_bit_177",
+      "detector_bit_178",
+      "detector_bit_179",
+      "detector_bit_180",
+      "detector_bit_181",
+      "detector_bit_182",
+      "detector_bit_183",
+      "detector_bit_184",
+      "detector_bit_185",
+      "detector_bit_186",
+      "detector_bit_187",
+      "detector_bit_188",
+      "detector_bit_189",
+      "detector_bit_190",
+      "detector_bit_191",
+      "detector_bit_192",
+      "detector_bit_193",
+      "detector_bit_194",
+      "detector_bit_195",
+      "detector_bit_196",
+      "detector_bit_197",
+      "detector_bit_198",
+      "detector_bit_199"
+    ],
+    "input_table": "ml/ml_google_decoder_example.parquet",
+    "model": {
+      "class": "sklearn.neural_network.MLPClassifier",
+      "n_iter": 300,
+      "params": {
+        "hidden_layer_sizes": [
+          32
+        ],
+        "max_iter": 300,
+        "random_state": 4000
+      }
+    },
+    "split_rows": {
+      "test": 25000,
+      "train": 20000,
+      "validation": 5000
+    },
+    "split_rule": "data_split column from Part I (google_data_split), same rule as Task B, restricted to the fixed subset above",
+    "subset_filter": "distance == 3 AND shot_index < 12500",
+    "target": "actual_observable_flip",
+    "threshold": {
+      "chosen_on": "validation",
+      "rule": "lowest logical-error rate over 0.01..0.99, tie -> closest to 0.5",
+      "validation_logical_error_rate": 0.4848,
+      "value": 0.52
+    }
+  }
+}

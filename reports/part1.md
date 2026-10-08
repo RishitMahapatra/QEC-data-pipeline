@@ -5,7 +5,7 @@ design, the important decisions, the rejected relationship, quality findings,
 the detector-storage measurement, the three analyses and the two example
 traces. The answers to every "Questions to investigate" item in
 `assignment/data-sources.md`, with their evidence, are in the decision log,
-[docs/decision-log.md](../docs/decision-log.md).
+[decision-log.md](decision-log.md).
 
 **Commands** (run from `starter/` inside the workspace container):
 
@@ -66,7 +66,7 @@ full run takes about 45 seconds without running any notebook cells (The notebook
 ## 2. Source discovery
 
 We recorded discovery questions and their evidence in
-[docs/decision-log.md](../docs/decision-log.md). The table below summarises
+[decision-log.md](decision-log.md). The table below summarises
 what we found for each source.
 
 | | `qec_syndromes` | `google_qec` | `qasmbench` |
@@ -93,14 +93,8 @@ Findings that shaped the design:
 - **QASMBench:** only `qec_sm_n5` has an explicit parity-check structure:
   3 data qubits, 2 ancillas and a 2-bit syndrome register. The other two
   benchmarks measure every qubit into one register, so their files do not
-  say which bits are syndrome bits.
-
-| Benchmark | Registers | 2-qubit gates | Measurements | Checks | Corrections |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `error_correctiond3_n5` | `q[5]`, `c[5]` | 49 | 5 | 0 | 0 |
-| `qec_en_n5` | `q[5]`, `c[5]` | 10 | 5 | 0 | 0 |
-| `qec_sm_n5` | `q[3]`, `a[2]`, `c[3]`, `syn[2]` | 4 | 5 | 2 | 3 |
-
+  say which bits are syndrome bits. The per-benchmark register, gate, check
+  and correction counts are in the decision log.
 
 ### Discovery Notebook
 
@@ -179,7 +173,8 @@ more than one source, which was mentioned in the project specs.
 6. **A parity check is recorded only where the circuit makes it explicit.**
    This means data qubits are CNOT controls onto an ancilla that only ever
    receives CNOTs and is then measured into a classical bit. We do not guess
-   roles for the two benchmarks without such a structure.
+   roles for the two benchmarks without such a structure (details in the
+   decision log).
 7. **Invalid values are never silently fixed.** They are excluded from Silver
    and kept in `data_issues.parquet` with `issue_id`, `run_id`,
    `source_record_id` (null for file-level issues), `rule_id`, `severity`,
@@ -221,9 +216,9 @@ rows = Gold rows):
 ## 6. Gold: relational design
 
 All Gold tables are in the PostgreSQL schema `gold`. Each table's row meaning
-is also stored in the database with  a a `COMMENT ON TABLE`, and every column has an inline comment.
+is also stored in the database with a `COMMENT ON TABLE`, and every column has an inline comment.
 
-Here is the full-schema ER diagram illustrating the relationships between tables within each source. Notice that no relationships cross between different sources.
+Here is the full-schema ER diagram illustrating the relationships between tables within each source. Notice that no relationships cross between different sources (this is later explained in section 7).
 
 ![Gold schema ER diagram](gold_er_diagram.svg)
 
@@ -272,8 +267,7 @@ gold_qasmbench_circuit 1──* gold_qasmbench_register
 | Value checks from the data | `physical_fault_rate` in (0, 1); `quantity > 0`; `round_count = check_count = 4`; the pattern is exactly 16 bytes of `00`/`01`; `basis IN ('X','Z')`; `(distance=3 AND detector_count=200) OR (distance=5 AND detector_count=600)`; `octet_length(detector_bits) = ceil(detector_count/8)`; `detector_event_count ≤ detector_count`; `cardinality(data_qubits) ≥ 1`; `code_family`/`distance` both set or both null |
 | Indexes | each foreign-key column used in joins: `gold_syndrome_observation(experiment_id)`, `(syndrome_bits)`; `gold_google_shot(experiment_id)`; `gold_google_decoder_prediction(decoder_name)`; `circuit_id` on the three QASMBench child tables |
 
-PostgreSQL `CHECK` constraints cannot read another table. To enforce
-*"this shot's byte length matches its own experiment"*, `measurement_count`
+PostgreSQL `CHECK` constraints cannot read another table. To enforce that shot's byte length matches its own experiment, `measurement_count`
 and `detector_count` are copied onto each shot row, and the composite foreign
 key forces those copies to match the experiment row.
 
@@ -612,7 +606,7 @@ deterministic.
 
 ## 12. Tests
 
-`make test` runs 177 tests (all passing). For testing the golf stager, the dwhyatabase tests use a
+`make test` runs 177 tests (all passing). For testing the gold stage, the database tests use a
 throwaway schema, not touching the real `gold` schema.
 
 | Area | Test files | Covers |
@@ -654,6 +648,6 @@ throwaway schema, not touching the real `gold` schema.
 ---
 
 ## Document for Questions to Investigate
-As mentioned before, [docs/decision-log.md](../docs/decision-log.md) answers each "Questions to
+As mentioned before, [decision-log.md](decision-log.md) answers each "Questions to
 investigate" item from `assignment/data-sources.md`, one by one, and points to
 the code, test or query that proves each answer.

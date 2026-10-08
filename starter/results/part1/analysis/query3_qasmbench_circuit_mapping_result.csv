@@ -1,0 +1,13 @@
+circuit_id,variant,ancilla_qubit,data_qubits,syndrome_bit,syndrome_register_size,condition_value,gate,target_qubit
+qec_sm_n5:source,source,a[0],"{q[0],q[1]}",syn[0],2,1,x,q[0]
+qec_sm_n5:source,source,a[0],"{q[0],q[1]}",syn[0],2,2,x,q[2]
+qec_sm_n5:source,source,a[0],"{q[0],q[1]}",syn[0],2,3,x,q[1]
+qec_sm_n5:source,source,a[1],"{q[1],q[2]}",syn[1],2,1,x,q[0]
+qec_sm_n5:source,source,a[1],"{q[1],q[2]}",syn[1],2,2,x,q[2]
+qec_sm_n5:source,source,a[1],"{q[1],q[2]}",syn[1],2,3,x,q[1]
+qec_sm_n5:transpiled,transpiled,a[0],"{q[0],q[1]}",syn[0],2,1,x,q[0]
+qec_sm_n5:transpiled,transpiled,a[0],"{q[0],q[1]}",syn[0],2,2,x,q[2]
+qec_sm_n5:transpiled,transpiled,a[0],"{q[0],q[1]}",syn[0],2,3,x,q[1]
+qec_sm_n5:transpiled,transpiled,a[1],"{q[1],q[2]}",syn[1],2,1,x,q[0]
+qec_sm_n5:transpiled,transpiled,a[1],"{q[1],q[2]}",syn[1],2,2,x,q[2]
+qec_sm_n5:transpiled,transpiled,a[1],"{q[1],q[2]}",syn[1],2,3,x,q[1]

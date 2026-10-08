@@ -238,19 +238,30 @@ Task C asks for one small multilayer perceptron (MLP) trained directly on
   no engineered features.
 - Target is `actual_observable_flip`, same target as Task B.
 - No required baseline (unlike Tasks A and B).
-- "You are not required to design or research a more complex model" — the
-  task is explicitly a **pipeline-consumer check**: can the prepared data
+- In this part we focus on making a **pipeline-consumer check**: can the prepared data
   feed a model that expects raw per-detector inputs, not "build the best
   decoder."
 
 ## How we decided to implement it
 
-**Why a fixed small MLP, not a search.** The spec says explicitly this
-isn't an architecture competition and model performance isn't graded. So
-we picked one small, fixed architecture (`hidden_layer_sizes=(32,)`,
-`max_iter=300`) up front and did not tune it — tuning would spend effort
+**Why an MLP for this table.** The spec asks for one small MLP, and it is
+also the simplest model that suits this input. Each row is 200 raw detector
+bits with no engineered features, so the model has to find useful
+combinations of bits by itself. Whether the logical observable flipped
+depends on *which* detectors fire together, not on each detector alone: the
+same detector firing can mean opposite things depending on its neighbours.
+A linear model, like the logistic regressions of Tasks A and B, gives each
+input one fixed weight and adds them up, so it cannot represent such
+combinations. One hidden layer of 32 units can, because each unit learns its
+own weighted mix of the 200 bits before the output combines them. The MLP
+also takes the flat 200-bit vector directly, which is exactly what this task
+tests: that the prepared ML table can feed a model expecting raw
+per-detector inputs.
+
+**Why a fixed small MLP, not a search.** Since the specs explicitly mention not to focus on the best architecture, we picked one small, fixed architecture (`hidden_layer_sizes=(32,)`,
+`max_iter=300`) up front and did not tune it. Tuning would spend effort
 the rubric doesn't reward and risks implicitly turning this into a
-competition the spec says to avoid.
+competition the spec says to avoid. Because of this cap, the MLP can stop before fully converging, which is expected since the cap keeps the run fast and repeatable.
 
 **Why we built our own bit-unpacking helper.** Tasks A and B use
 course-supplied helpers (`syndrome_model_input`, `google_meta_model_input`)
@@ -258,15 +269,15 @@ to turn packed bytes into model inputs. No course helper does this for
 *raw* detector bits at the per-bit level Task C needs, so we wrote
 `unpack_detector_matrix()` ourselves, using `numpy.unpackbits(...,
 bitorder="little")` — the same little-endian-per-byte convention Part I
-used to pack the bits in the first place (documented in the Gold design
-doc, Section 6.5). We reused the existing convention rather than inventing
+used to pack the bits in the first place (documented in part1.md,
+section 6.5). We reused the existing convention rather than inventing
 a new one, so Task C's inputs stay consistent with how the rest of the
 pipeline reads these bytes.
 
 **Why we filter before unpacking, not after.** `raw_detector_splits()`
 filters the table to `distance == 3 AND shot_index < 12_500` first, then
 groups by the *existing* `data_split` column. We don't recompute splits
-ourselves — the split was already assigned by Part I (`google_data_split`)
+ourselves, the split was already assigned by Part I (`google_data_split`)
 and already verified against that rule by `validate_google_table()`. Task
 C's job is to consume that split, restricted to its bounded subset, not to
 invent a new split rule.
@@ -298,7 +309,16 @@ QEC rounds) and why that limits the prototype. We treat this as a required
 deliverable, not an optional aside — `task_c_report()` always includes it
 automatically.
 
-## Rubric comparison (item 8 — Raw-detector prototype, 6 points)
+**Why we report a result that is no better than guessing.** On test the
+MLP has a logical-error rate of 0.5056, while 50.0% of the test shots flip,
+so it does no better than a coin flip. Its Brier score (0.4026) is worse
+than the 0.25 of always predicting 50%, so its probabilities are
+confidently wrong. On its own training rows it reaches 0.147 (Brier 0.106):
+it has memorised the 20,000 training shots instead of learning a rule that
+carries over to new shots. The 300-iteration cap also means it may stop before fully converging, which is why the tests print a
+`ConvergenceWarning`. We keep this result as it is: tuning is outside the scope of this project.
+
+## Rubric comparison (item 8)
 
 | Rubric requirement (5–6 point band) | How Task C meets it |
 | --- | --- |
@@ -307,7 +327,7 @@ automatically.
 | Training/prediction time is recorded | `run_task_c()` times `.fit()` once and `.predict_proba()` per split, stored in `metrics["models"][MLP_MODEL_ID]` |
 | The report clearly explains information hidden by a flat input | `task_c_report()`'s closing paragraph names spatial adjacency and temporal (across-round) structure as what gets discarded, and explains why that caps a flat-vector model regardless of tuning |
 
-Nothing here claims or needs a specific accuracy number — rubric item 8,
+Nothing here claims or needs a specific accuracy number, rubric item 8,
 like the rest of Part II, does not grade model performance, only that the
 prototype is correctly scoped, correctly built, and honestly explained.
 
@@ -326,3 +346,20 @@ prototype is correctly scoped, correctly built, and honestly explained.
   single_row_helper`, `test_raw_detector_features_are_200_bits_wide`,
   `test_task_c_is_repeatable`, and the shared `evaluate()`/`choose_threshold()`
   tests Tasks A/B/C all exercise.
+
+
+# Repeatability, evaluation and tests
+
+## Rubric comparison (item 9)
+
+| Rubric requirement (9–10 point band) | How Part II meets it |
+| --- | --- |
+| One command regenerates model files, predictions, metrics, and run facts | `make train` (`python -m quantum_lake_student.cli train`) reads only the two ML Parquet tables and rewrites `results/part2/`: the 7 model files under `models/`, `predictions.parquet`, `metrics.json`, `run.json` and `report.md`. `test_run_reads_only_the_ml_files_and_writes_results` checks that nothing else is read |
+| Input hashes, settings, feature order, splits, seeds, and timings are recorded | `run.json` records the data release, the SHA-256 of both ML tables (`input_hashes`), the code revision, the dependency versions (Python, numpy, pyarrow, scikit-learn, scipy), `random_seed`, the model files, and per task the input table, target, feature helper, `feature_order`, `split_rule`, split sizes, model settings and threshold. Training and prediction times are in `metrics.json` for every model |
+| Tests cover contracts, split use, weights, bit order/event counts, repeatability, and metrics | contracts: `test_wrong_column_type_is_rejected`, `test_bad_google_rows_are_rejected`; split use: `test_rows_stay_in_their_supplied_split`, `test_split_that_disagrees_with_fault_rate_is_rejected`; weights: `test_weight_counts_like_repeated_rows`; bit order and event counts: `test_toy_packing_is_little_endian_within_each_byte`, `test_unpack_detector_matrix_matches_the_single_row_helper`; repeatability: `test_task_a_is_repeatable`, `test_task_b_is_repeatable`, `test_task_c_is_repeatable`; metrics: `test_weighted_metrics_match_hand_calculation`, `test_supplied_decoder_metrics_match_hand_count` |
+| Prediction IDs trace back through Part I | Every row of `predictions.parquet` keeps the `example_id` of its ML row, for all splits. Part I's `trace_examples` stage follows one syndrome and one Google `example_id` from ML to Gold, Silver and Bronze (part1.md section 9) |
+
+The split is fixed and nothing is shuffled, the seed is fixed, and the
+dependency versions are pinned (`==`) in `starter/pyproject.toml` and
+`docker/requirements.txt`, so two runs on the same ML
+tables give the same predictions and model files; only the timings differ.

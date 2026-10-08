@@ -159,34 +159,14 @@ is `true`: belief matching and tensor network predict `true` (correct), while
 correlated matching and PyMatching predict `false` (`was_wrong = true`).
 
 ### Beyond the packed per-shot bits the Google `ml` table needs, what should Gold do with detector events: one row per fired detector, or per-position summaries? Which supports the required analyses, and at what size? — *Stage: Gold (relational design decision)*
-**Neither.** Gold keeps the packed bits (**one `BYTEA` value per shot**,
-needed by the ML table) and adds one per-shot summary,
-`detector_event_count`. No required analysis looks at single detectors:
-decoder error per distance and location (query 2) comes from the predictions,
-and the count feeds the event-density input of Task B. We measured all three
-options on the real Gold data:
-
-| Option | Rows | Size | Supports the required analyses? |
-| --- | ---: | ---: | --- |
-| Packed bits + `detector_event_count` on `gold_google_shot` (chosen) | 250,000 (one per shot) | 103 MB for the whole shot table; 8,750,000 bytes of detector data | Yes: the analyses need no single detectors, and the ML export gets the bits and the count |
-| One row per fired detector `(experiment_id, shot_index, detector_index)` | **10,446,925** (5,667,180 at d=3, 4,779,745 at d=5) | **1,439 MB** with its primary key (763 MB of table data) | Yes, but nothing in them needs a single detector |
-| Per-position summaries: fire count per (experiment, detector position) | 1,400 (4 × 200 + 600) | 136 kB | No: they lose the per-shot link, so they cannot be joined to decoder mistakes |
-
-The fired-detector rows were built as a temporary table from
-`get_bit(detector_bits, i)` over every shot. Their count equals
-`SUM(detector_event_count)`, and the 1,400 summaries add up to the same
-total. On average 28.3 of 200 detectors fire per d=3 shot and 95.6 of 600
-per d=5 shot, so fired-only rows are about 7× fewer than one row per
-detector (70,000,000), but still 42× more rows than shots and 14× the size
-of the whole shot table, as a duplicate of bytes Gold already stores.
-
-The per-position summaries are small and cheap, but no required analysis
-asks "which detector fires most", so we do not build them. They can be
-derived later from the packed bits without changing the schema. The cost of
-the chosen design is that SQL cannot filter on one detector; the bits must
-be unpacked (in Python, or with `get_bit` as above). The ML export copies
-the packed bytes from Gold unchanged (tested byte for byte against Silver).
-See part1.md section 6.5.
+**Neither.** Gold keeps the packed bits (one `BYTEA` value per shot, needed
+by the ML table) plus a per-shot `detector_event_count`. No required analysis
+looks at single detectors, so neither alternative is built. Measured on the
+real Gold data: one row per fired detector would be 10,446,925 rows and
+1,439 MB, against 103 MB for the whole shot table; per-position summaries
+would be only 1,400 rows (136 kB), but they lose the link to individual
+shots. The full comparison and the cost of the choice are in part1.md
+section 6.5.
 
 ### Which supplied decoders make different mistakes, and can a simple combined model use that disagreement to predict the actual label? — *Stage: Part II (Task B)*
 **They make partly different mistakes, but a linear combination cannot use

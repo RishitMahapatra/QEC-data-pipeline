@@ -1,0 +1,15 @@
+physical_fault_rate,logical_error_label,weighted_count
+0.00001,False,9997660
+0.00001,True,2340
+0.00005,False,9988458
+0.00005,True,11542
+0.0001,False,9977090
+0.0001,True,22910
+0.0005,False,9885597
+0.0005,True,114403
+0.001,False,9772982
+0.001,True,227018
+0.005,False,8960500
+0.005,True,1039500
+0.01,False,8134726
+0.01,True,1865274

@@ -1,0 +1,155 @@
+{
+  "build_ml_tables": {
+    "ml_google_decoder_example": {
+      "gold_rows": 250000,
+      "match": true,
+      "ml_rows": 250000,
+      "unresolved_example_ids": 0
+    },
+    "ml_syndrome_decoder_example": {
+      "gold_rows": 75598,
+      "match": true,
+      "ml_rows": 75598,
+      "unresolved_example_ids": 0
+    }
+  },
+  "load_postgres": {
+    "google_qec": {
+      "decoder_prediction": {
+        "expected": 1000000,
+        "gold_loaded": 1000000,
+        "match": true
+      },
+      "experiment": {
+        "gold_loaded": 5,
+        "match": true,
+        "silver_rows": 5
+      },
+      "shot": {
+        "gold_loaded": 250000,
+        "match": true,
+        "silver_rows": 250000
+      }
+    },
+    "qasmbench": {
+      "circuit": {
+        "gold_loaded": 6,
+        "match": true,
+        "silver_rows": 6
+      },
+      "conditional_correction": {
+        "gold_loaded": 6,
+        "match": true,
+        "silver_rows": 6
+      },
+      "register": {
+        "gold_loaded": 16,
+        "match": true,
+        "silver_rows": 16
+      },
+      "stabilizer_check": {
+        "gold_loaded": 4,
+        "match": true,
+        "silver_rows": 4
+      }
+    },
+    "qec_syndromes": {
+      "gold_observation_rows": 75598,
+      "gold_quantity_total": 70000000,
+      "quantity_by_experiment": {
+        "qec_syndromes:d-3_pfr-0.000010_nb-10M.csv": {
+          "gold": 10000000,
+          "match": true,
+          "silver": 10000000
+        },
+        "qec_syndromes:d-3_pfr-0.000050_nb-10M.csv": {
+          "gold": 10000000,
+          "match": true,
+          "silver": 10000000
+        },
+        "qec_syndromes:d-3_pfr-0.000100_nb-10M.csv": {
+          "gold": 10000000,
+          "match": true,
+          "silver": 10000000
+        },
+        "qec_syndromes:d-3_pfr-0.000500_nb-10M.csv": {
+          "gold": 10000000,
+          "match": true,
+          "silver": 10000000
+        },
+        "qec_syndromes:d-3_pfr-0.001000_nb-10M.csv": {
+          "gold": 10000000,
+          "match": true,
+          "silver": 10000000
+        },
+        "qec_syndromes:d-3_pfr-0.005000_nb-10M.csv": {
+          "gold": 10000000,
+          "match": true,
+          "silver": 10000000
+        },
+        "qec_syndromes:d-3_pfr-0.010000_nb-10M.csv": {
+          "gold": 10000000,
+          "match": true,
+          "silver": 10000000
+        }
+      },
+      "quantity_match": true,
+      "rows_match": true,
+      "silver_quantity_total": 70000000,
+      "silver_rows": 75598
+    }
+  },
+  "prepare_data": {
+    "google_qec": {
+      "experiment": {
+        "accepted": 5,
+        "read": 5,
+        "rejected": 0
+      },
+      "shot": {
+        "accepted": 250000,
+        "read": 250000,
+        "rejected": 0
+      },
+      "trace_rows": 2000005
+    },
+    "qasmbench": {
+      "circuit": {
+        "accepted": 6,
+        "read": 6,
+        "rejected": 0
+      },
+      "conditional_correction": {
+        "accepted": 6
+      },
+      "stabilizer_check": {
+        "accepted": 4
+      },
+      "trace_rows": 16
+    },
+    "qec_syndromes": {
+      "accepted": 75598,
+      "read": 75598,
+      "rejected": 0
+    }
+  },
+  "register_sources": {
+    "accepted": 3,
+    "objects": {
+      "google_qec": {
+        "member_count": 76,
+        "size_bytes": 14638673
+      },
+      "qasmbench": {
+        "member_count": 19,
+        "size_bytes": 144172
+      },
+      "qec_syndromes": {
+        "member_count": 8,
+        "size_bytes": 358017
+      }
+    },
+    "read": 3,
+    "rejected": 0
+  }
+}
