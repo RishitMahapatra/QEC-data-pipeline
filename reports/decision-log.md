@@ -170,29 +170,13 @@ section 6.5.
 
 ### Which supplied decoders make different mistakes, and can a simple combined model use that disagreement to predict the actual label? — *Stage: Part II (Task B)*
 **They make partly different mistakes, but a linear combination cannot use
-that: it only ties the best single decoder.**
-
-- **Ranking (test logical error rate, d=3 / d=5):** tensor network
-  contraction 0.3967 / 0.3952, belief matching 0.4013 / 0.3994, correlated
-  matching 0.4220 / 0.4226, PyMatching 0.4364 / 0.4548. The order is the
-  same at both distances and matches Part I query 2.
-- **Different mistakes:** the four decoders disagree on 55.4% (d=3) and
-  64.8% (d=5) of test shots. For each pair, the shared mistakes divided by
-  all mistakes of either decoder is 0.36–0.53 at d=3 and 0.33–0.49 at d=5,
-  so most pairs share less than half of their errors.
-- **Shared mistakes:** all four are wrong on 14.4% (d=3) and 10.9% (d=5) of
-  test shots. No combination of their answers can fix these.
-- **Combined model:** the five-input logistic regression we made (event density +
-  four predictions, threshold 0.51 / 0.55 chosen on validation), reaches
-  0.3977 at both distances, so it does not beat tensor network contraction.
-  Compared with that decoder it fixes about as many shots as it breaks
-  (d=3: 6.6% fixed, 6.7% broken; d=5: 5.3% fixed, 5.6% broken). Among the
-  decoders, its largest coefficient is on tensor network contraction
-  (0.53 / 0.59) and its smallest on PyMatching (0.17 / 0.22), so it mostly
-  follows the best decoder.
-
-The disagreement alone is not enough: a fixed linear vote cannot tell which
-decoder is right on a given shot. See part2.md, Task B.
+that: it only ties the best single decoder.** The four decoders disagree on
+55.4% (d=3) and 64.8% (d=5) of test shots, but all four are wrong together
+on 14.4% and 10.9%, which no combination of their answers can fix. The
+five-input combined model reaches 0.3977 at both distances, against 0.3967
+(d=3) and 0.3952 (d=5) for the best decoder, tensor network contraction.
+The full ranking, the overlap per decoder pair and the combined model's
+coefficients are in part2.md, Task B.
 
 ### Why should distances three and five use separate raw-detector models? — *Stage: Part II (feature-width design)*
 The inputs have different shapes and meanings:

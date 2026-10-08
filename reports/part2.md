@@ -183,12 +183,19 @@ their mistakes; two distance-3 pairs share slightly more (53%). All four
 are wrong together on 14.4% of distance-3 shots and 10.9% of distance-5
 shots, and no combination of their answers can fix those.
 
-**Why we report that the combination only ties the best decoder.** Tensor
-network contraction is the best supplied decoder (0.3967 at distance 3,
-0.3952 at distance 5). The combined model reaches 0.3977 at both: it fixes
-about as many shots as it breaks (6.6% against 6.7% at distance 3). The
-coefficients agree with the ranking, with the largest weight on tensor
-network and the smallest on PyMatching.
+**Why we report that the combination only ties the best decoder.** On test,
+the four supplied decoders rank the same way at both distances (logical-error
+rate, d=3 / d=5): tensor network contraction 0.3967 / 0.3952, belief matching
+0.4013 / 0.3994, correlated matching 0.4220 / 0.4226, PyMatching
+0.4364 / 0.4548. This matches Part I query 2. They disagree on 55.4% (d=3)
+and 64.8% (d=5) of test shots, so their mistakes are partly different. The
+combined model still reaches only 0.3977 at both distances: compared with
+tensor network contraction it fixes about as many shots as it breaks (d=3:
+6.6% fixed, 6.7% broken; d=5: 5.3% fixed, 5.6% broken). Among the decoders,
+its largest coefficient is on tensor network contraction (0.53 / 0.59) and
+its smallest on PyMatching (0.17 / 0.22), so it mostly follows the best
+decoder. The disagreement alone is not enough: a fixed linear vote cannot
+tell which decoder is right on a given shot.
 
 ## Rubric comparison (item 7 — Google combined decoder, 12 points)
 
