@@ -442,46 +442,22 @@ def load_syndrome_tables(cursor, silver_table) -> None:
 
 # ---------------------------------------------------------------------------
 # qasmbench Gold tables
-#
-# Requirements this section is built against (assignment/data-sources.md's
-# qasmbench section and assignment/brief.md's Gold section, not google_qec's
-# shape): "at minimum, extract... parity-check ancilla, data participants,
-# and syndrome bit where explicit; syndrome-controlled correction value,
-# gate, and target" and "Keep QASMBench circuits as their own entities
-# because no row-level match to the experiments is supplied." qasmbench has
-# no google_qec-style cross-column fact to enforce (no distance<->detector
-# relationship); its data-driven rules are the two decisions below instead.
 # ---------------------------------------------------------------------------
 
 QASMBENCH_SOURCE_NAME = "qasmbench"
 
-# Register-decomposition decision: Silver's circuit.parquet keeps
-# register_declarations as one JSON-text column (a nested list of qreg/creg
-# name+size pairs). Gold decomposes it into its own table,
-# gold_qasmbench_register - one row per declared register - instead of also
-# carrying a JSONB copy of the same column. Two representations of the same
-# fact with nothing keeping them in sync is worse than one, and the brief
-# says Gold must not "merely copy each Silver table into PostgreSQL": turning
-# an opaque JSON blob into typed, constrained (register_size > 0,
-# register_kind IN ('qreg','creg')) rows is exactly that kind of value-add.
+# Silver stores register_declarations as a JSON blob; Gold splits it into
+# one typed row per register so it can be queried and constrained properly.
 
-# data_qubits-as-array decision: stabilizer_check.parquet's data_qubits is a
-# small (2 elements), fixed-shape, ordered attribute of one check row, not an
-# independent many-to-many relationship worth its own junction table - across
-# the whole qasmbench archive it is ~8 total (qubit, check) pairs.
-# gold_qasmbench_stabilizer_check.data_qubits stays a native TEXT[] column
-# with a CHECK that it is never empty (cardinality(), not array_length(...,1):
-# array_length of an empty array is NULL, and a NULL CHECK expression passes,
-# so an array_length-based check would silently let an empty array through).
+# data_qubits is kept as a TEXT[] column rather than a junction table -
+# there are only ~8 (qubit, check) pairs in the whole archive, so a separate
+# table would add overhead for no real gain. We use cardinality() in the
+# CHECK (not array_length) because array_length returns NULL for empty arrays,
+# which would silently pass the constraint.
 
-# Shared-vocabulary labels (see "Shared QEC vocabulary" at the top): only
-# circuits whose code is explicit in the file get a code_family/distance.
-# qec_sm_n5 declares 3 data qubits (q[3]) and 2 ancillas (a[2]) that check
-# neighbouring pairs q[0],q[1] and q[1],q[2] into a 2-bit syndrome register,
-# and every non-zero syndrome value flips exactly one data qubit: a distance-3
-# bit-flip repetition code. error_correctiond3_n5 and qec_en_n5 have no
-# explicit parity-check structure (docs/decision-log.md, qasmbench section),
-# so they stay NULL rather than getting a guessed label.
+# Only circuits with an explicit parity-check structure get a code_family/distance label.
+# qec_sm_n5 is a distance-3 repetition code (3 data qubits, 2 parity checks).
+# The other two benchmarks have no explicit structure, so they stay NULL.
 QASMBENCH_CODE_LABELS = {
     "qec_sm_n5": ("repetition_code", 3),
 }
@@ -585,12 +561,10 @@ def _check_repetition_code_labels(circuit_rows: list[dict], stabilizer_rows: lis
 
 
 def load_qasmbench_gold(conn, settings) -> tuple[int, int, int, int, str, str, str]:
-    # Args:
-    # conn: takes the PostgreSQL connection, settings = env config  returns
-    # (circuit count, register count, stabilizer-check count, correction
-    # count, circuit file hash, stabilizer_check file hash, conditional_correction file hash)
-
     """Load Silver's qasmbench Parquet tables into Postgres, all-or-nothing.
+
+    Returns (circuit count, register count, stabilizer-check count, correction count,
+    circuit hash, stabilizer hash, correction hash).
 
     Truncates gold_qasmbench_circuit first (CASCADE also clears
     gold_qasmbench_register, gold_qasmbench_stabilizer_check, and
@@ -615,7 +589,8 @@ def load_qasmbench_gold(conn, settings) -> tuple[int, int, int, int, str, str, s
     register_rows = _register_rows(circuit_rows)
     _check_repetition_code_labels(circuit_rows, stabilizer_rows)
 
-    with conn.cursor() as cur:  # TRUNCATE wipes all four Gold tables - CASCADE handles the dependency order automatically
+    with conn.cursor() as cur:
+        # Truncating the parent table cascades to the three dependent tables.
         cur.execute("TRUNCATE TABLE gold_qasmbench_circuit RESTART IDENTITY CASCADE;")
 
         cur.executemany(

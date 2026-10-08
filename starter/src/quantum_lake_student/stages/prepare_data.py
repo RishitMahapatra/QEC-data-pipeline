@@ -351,7 +351,6 @@ def _add_trace(
     trace["record_locator"].append(locator)
     trace["input_sha256"].append(input_sha256)
 
-#loops over the 5th experiments returning the experiment and shot table plus the issueds , trace rows and the count of shots read.
 def build_google_table(
     zf: zipfile.ZipFile, *, bronze_object: str, input_sha256: str, run_id: str
 ) -> GoogleSilver:
@@ -936,8 +935,8 @@ def _syndromes_record_id(member: str, row_index: int) -> str:
 
 
 def _syndromes_parse_bits(raw: str) -> list[list[int]] | None:
-    # turns the syndromes column text into actual Python numbers and checks
-    # if it's really 4 groups of 4 0's/1's; if anything's off, it returns None
+    # Parse the syndromes column text and validate it is a 4x4 grid of 0/1 values.
+    # Returns None if anything doesn't look right.
     try:
         parsed = ast.literal_eval(raw)
     except (ValueError, SyntaxError):
@@ -955,8 +954,7 @@ def _syndromes_parse_bits(raw: str) -> list[list[int]] | None:
 
 
 def _syndromes_pack_bits(rounds: list[list[int]]) -> bytes:
-    # takes syndromes column numbers and flattens them into 16 single bytes in
-    # order, which is what the output table expects
+    # Flatten the 4x4 nested structure into 16 ordered bytes.
     return bytes(bit for round_bits in rounds for bit in round_bits)
 
 
