@@ -93,10 +93,10 @@
 <text x="380.0" y="140.0" text-anchor="middle" class="card">1 : many</text>
 <path d="M800,152.0 H760.0 V192.0 H720" class="edge" marker-start="url(#one)" marker-end="url(#zeroMany)"/>
 <text x="760.0" y="140.0" text-anchor="middle" class="card">1 : many</text>
-<rect x="20" y="324" width="1480" height="310" rx="10" fill="#f5fdf7" stroke="#166534" stroke-opacity="0.35" stroke-dasharray="6 4"/>
+<rect x="20" y="324" width="1480" height="330" rx="10" fill="#f5fdf7" stroke="#166534" stroke-opacity="0.35" stroke-dasharray="6 4"/>
 <text x="36" y="348" class="band" fill="#166534">google_qec</text>
 <text x="36" y="348" dx="108.0" class="sub">hardware surface-code experiments, shots and decoder predictions</text>
-<rect x="40" y="368" width="300" height="234" rx="6" fill="#ffffff" stroke="#166534" stroke-width="1.4"/>
+<rect x="40" y="368" width="300" height="254" rx="6" fill="#ffffff" stroke="#166534" stroke-width="1.4"/>
 <path d="M40,396 V374 a6,6 0 0 1 6,-6 H334 a6,6 0 0 1 6,6 V396 Z" fill="#dcfce7" stroke="#166534" stroke-width="1.4"/>
 <text x="190.0" y="387" text-anchor="middle" class="title" fill="#166534">gold_google_experiment</text>
 <text x="48" y="410" class="key">PK</text>
@@ -120,20 +120,24 @@
 <text x="48" y="510" class="key"></text>
 <text x="92" y="510" class="col">rounds</text>
 <text x="332" y="510" text-anchor="end" class="type">int</text>
+<rect x="41" y="516" width="298" height="20" fill="#f6f7f9"/>
 <text x="48" y="530" class="key"></text>
-<text x="92" y="530" class="col">center_row</text>
+<text x="92" y="530" class="col">shots</text>
 <text x="332" y="530" text-anchor="end" class="type">int</text>
-<rect x="41" y="536" width="298" height="20" fill="#f6f7f9"/>
 <text x="48" y="550" class="key"></text>
-<text x="92" y="550" class="col">center_col</text>
+<text x="92" y="550" class="col">center_row</text>
 <text x="332" y="550" text-anchor="end" class="type">int</text>
+<rect x="41" y="556" width="298" height="20" fill="#f6f7f9"/>
 <text x="48" y="570" class="key"></text>
-<text x="92" y="570" class="col">measurement_count</text>
+<text x="92" y="570" class="col">center_col</text>
 <text x="332" y="570" text-anchor="end" class="type">int</text>
-<rect x="41" y="576" width="298" height="20" fill="#f6f7f9"/>
 <text x="48" y="590" class="key"></text>
-<text x="92" y="590" class="col">detector_count</text>
+<text x="92" y="590" class="col">measurement_count</text>
 <text x="332" y="590" text-anchor="end" class="type">int</text>
+<rect x="41" y="596" width="298" height="20" fill="#f6f7f9"/>
+<text x="48" y="610" class="key"></text>
+<text x="92" y="610" class="col">detector_count</text>
+<text x="332" y="610" text-anchor="end" class="type">int</text>
 <rect x="420" y="368" width="300" height="234" rx="6" fill="#ffffff" stroke="#166534" stroke-width="1.4"/>
 <path d="M420,396 V374 a6,6 0 0 1 6,-6 H714 a6,6 0 0 1 6,6 V396 Z" fill="#dcfce7" stroke="#166534" stroke-width="1.4"/>
 <text x="570.0" y="387" text-anchor="middle" class="title" fill="#166534">gold_google_shot</text>
