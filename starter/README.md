@@ -41,11 +41,11 @@ first stage that fails:
 | `build_ml_tables` | Gold views -> the two ML tables, contract checks, the three analysis queries | `ml/...`, `results/part1/analysis/query*_result.csv` |
 | `trace_examples` | follows one syndrome and one Google example from ML down to the raw Bronze record | `results/part1/trace_examples.json` |
 
-A full run takes about 30 seconds. Running it twice on unchanged input gives
+A full run takes under a minute. Running it twice on unchanged input gives
 identical Silver/ML files and identical Gold rows. Silver and ML live in the
 MinIO bucket (`http://localhost:9001`), not in this folder.
 
-Suggested source layout:
+Source layout:
 
 ```text
 src/quantum_lake_student/
@@ -58,8 +58,9 @@ src/quantum_lake_student/
 └── stages/
     ├── register_sources.py
     ├── prepare_data.py
-    ├── build_ml_tables.py
     ├── load_postgres.py
+    ├── build_ml_tables.py
+    ├── trace_examples.py
     └── train.py
 ```
 

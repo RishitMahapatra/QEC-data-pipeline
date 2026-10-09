@@ -5,7 +5,14 @@ This folder holds everything you need to run the assignment locally:
 - MinIO (object storage)
 - PostgreSQL 16 + Adminer
 - JupyterLab with all the Python dependencies pre-installed
-- The three QEC datasets, already included — no Kaggle account or API keys needed
+- The three QEC datasets are **not** included in this submission (course rule). Before running
+  `make bootstrap`, place the supplied archives at:
+  - `datasets/student-bundle/core/raw/source=google_qec/google-surface-code-curated.zip`
+  - `datasets/student-bundle/core/raw/source=qasmbench/qasmbench-qec.zip`
+  - `datasets/student-bundle/core/raw/source=qec_syndromes/syndromes_dataset.zip`
+
+  `make bootstrap` checks their SHA-256 hashes against `metadata/bundle-manifest.json`.
+
 - Connection helpers, starter stage files, and basic tests to build on
 
 ## Before you start
