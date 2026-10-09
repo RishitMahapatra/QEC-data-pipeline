@@ -60,3 +60,6 @@ Running Part 1 twice gives identical outputs and no duplicate records. For a run
 - Tests: `starter/tests/`
 - Part I analysis queries + results: `starter/results/part1/analysis/`
 - Run evidence: `starter/results/part1/` (after `make run`) and `starter/results/part2/` (after `make train`)
+- Silver and ML tables from the final clean run (copied from MinIO):
+  `starter/lake/silver/` (the six Silver tables) and `starter/lake/ml/` (the two ML tables).
+  The pipeline itself reads and writes them in the MinIO bucket; `make run` regenerates them there.

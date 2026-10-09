@@ -6,15 +6,15 @@
         "balanced_accuracy": 0.5008385547826427,
         "brier_score": 0.09095580410416895,
         "logical_error_rate": 0.104052,
-        "prediction_seconds": 0.00021445902530103922,
-        "training_seconds": 0.0813606670126319
+        "prediction_seconds": 0.00021829199977219105,
+        "training_seconds": 0.11521070898743346
       },
       "task_a_weighted_prior": {
         "balanced_accuracy": 0.5,
         "brier_score": 0.09691046819962242,
         "logical_error_rate": 0.10395,
-        "prediction_seconds": 0.00022954202722758055,
-        "training_seconds": 0.0034497920132707804
+        "prediction_seconds": 0.00018041697330772877,
+        "training_seconds": 0.003846541978418827
       }
     },
     "test_physical_shots": 10000000,
@@ -88,8 +88,8 @@
             "balanced_accuracy": 0.6018877873109953,
             "brier_score": 0.23515219914160934,
             "logical_error_rate": 0.39768,
-            "prediction_seconds": 0.0006775409856345505,
-            "training_seconds": 0.03320116698159836
+            "prediction_seconds": 0.0007115830085240304,
+            "training_seconds": 0.03506270801881328
           },
           "task_b_d3_correlated_matching": {
             "balanced_accuracy": 0.5779208474436803,
@@ -102,8 +102,8 @@
             "balanced_accuracy": 0.5,
             "brier_score": 0.24995202015625007,
             "logical_error_rate": 0.49295,
-            "prediction_seconds": 0.00036691699642688036,
-            "training_seconds": 0.0010562920069787651
+            "prediction_seconds": 0.00040133396396413445,
+            "training_seconds": 0.001068916986696422
           },
           "task_b_d3_pymatching": {
             "balanced_accuracy": 0.5634564847837398,
@@ -183,8 +183,8 @@
             "balanced_accuracy": 0.6026480526322432,
             "brier_score": 0.23406043447168412,
             "logical_error_rate": 0.39768,
-            "prediction_seconds": 0.00021558298612944782,
-            "training_seconds": 0.008735790994251147
+            "prediction_seconds": 0.00021754199406132102,
+            "training_seconds": 0.008893750025890768
           },
           "task_b_d5_correlated_matching": {
             "balanced_accuracy": 0.5774100785929823,
@@ -197,8 +197,8 @@
             "balanced_accuracy": 0.5,
             "brier_score": 0.250005088,
             "logical_error_rate": 0.50152,
-            "prediction_seconds": 0.00011958298273384571,
-            "training_seconds": 0.00040129199624061584
+            "prediction_seconds": 0.00011629104847088456,
+            "training_seconds": 0.00040312501369044185
           },
           "task_b_d5_pymatching": {
             "balanced_accuracy": 0.5451846095780879,
@@ -231,10 +231,14 @@
         "balanced_accuracy": 0.4944425662577297,
         "brier_score": 0.40255081734769044,
         "logical_error_rate": 0.50556,
-        "prediction_seconds": 0.004902916989522055,
-        "training_seconds": 5.373834460013313
+        "prediction_seconds": 0.003893749963026494,
+        "training_seconds": 5.463964877999388
       }
     },
-    "test_shots": 25000
+    "test_shots": 25000,
+    "train_fit": {
+      "brier_score": 0.10629619589248873,
+      "logical_error_rate": 0.14705
+    }
   }
 }

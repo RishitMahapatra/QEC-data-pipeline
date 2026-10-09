@@ -1,7 +1,7 @@
 {
-  "run_id": "00d6ddb2-0974-4e23-8f25-a5ae27b54430",
-  "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
-  "generated_at": "2026-10-06T18:43:09.614276+00:00",
+  "run_id": "19e8b0da-9f13-4662-affc-1dbc144f6490",
+  "code_revision": "064c97de594bc6bbdfbaecba048a38da1e8421e7",
+  "generated_at": "2026-10-09T08:56:09.749877+00:00",
   "path": "prediction -> ML row -> Gold record(s) -> Silver row -> source_trace rows -> raw Bronze record(s)",
   "syndrome_trace": {
     "example_id": "c18184e7f89343e21bd27ff65b57b93f",

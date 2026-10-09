@@ -59,7 +59,7 @@ if any of the stages fail:
 
 Each layer reads only the one before it. The ML export never reads Bronze or
 Silver, and a test checks this. A
-full run takes about 45 seconds without running any notebook cells (The notebook was just used for the first discovery stage).
+full run takes about 30 seconds without running any notebook cells (The notebook was just used for the first discovery stage).
 
 ---
 
@@ -555,25 +555,30 @@ definition, not any measured run.
   deterministic keys with stale rows deleted (syndromes), inside one
   transaction.
 
-**Clean-environment evidence (2026-10-04, code revision `77fc0fa`).** We
+**Clean-environment evidence (2026-10-09, code revision `064c97d`).** We
 started from an empty platform and ran:
 
-1. `make reset-platform`, which deletes the Postgres and MinIO volumes. Any
-   previously generated `results/part1/` files were moved away first, so
-   every output had to be regenerated.
+1. `make reset-platform`, which deletes the Postgres and MinIO volumes, so
+   Silver, Gold and ML had to be rebuilt from Bronze.
 2. `make bootstrap`. All dataset integrity and environment checks passed,
    and Gold had 0 tables.
-3. `make run` twice, giving run 1 `f4f249f9-ef6e-4f63-9b74-dcd61520da35` and
-   run 2 `bc5150c5-1254-4e51-a0dc-462fb70cdde6`. Each took about 45 s.
-4. `make test`: 177 passed.
+3. `make run`, giving run 1 `b2631858-60fc-4ff8-893f-6c93178344e1`.
+4. `make train` (Part II), so that the second run can trace a prediction.
+5. `make run` again, giving run 2 `19e8b0da-9f13-4662-affc-1dbc144f6490`.
+   Each run took about 30 s.
+6. `make test`: 223 passed.
 
 | Output | Run 1 | Run 2 | Same? |
 | --- | --- | --- | --- |
 | `ml_google_decoder_example.parquet` SHA-256 | `73ddcd00…7b24a9` | `73ddcd00…7b24a9` | ✓ byte-identical |
 | `ml_syndrome_decoder_example.parquet` SHA-256 | `bc89a69b…ec56bf` | `bc89a69b…ec56bf` | ✓ byte-identical |
-| 3 analysis result CSVs, `data_issues.parquet` | — | — | ✓ byte-identical |
+| Silver Parquet files and Bronze input SHA-256 (in `run.json`) | — | — | ✓ identical |
 | `row_counts.json` (without run IDs and times) | `e414443b…` | `e414443b…` | ✓ identical |
-| `source_trace.parquet` (2,075,619 rows) | `20c5ca7b…` | `a1184a0e…` | ✓ same rows in the same order (see note) |
+| `source_trace.parquet` rows per source (in `run.json`) | 75,598 / 2,000,005 / 16 | 75,598 / 2,000,005 / 16 | ✓ identical (see note) |
+
+The ML hashes are also the same as in our earlier clean run on 2026-10-04
+(revision `77fc0fa`), and the analysis result CSVs and `data_issues.parquet`
+are byte-identical to that run's committed versions.
 
 Gold after each run (rows = distinct business keys, so no duplicates):
 
@@ -590,10 +595,10 @@ The counts were identical after both runs.
 *Note on `source_trace.parquet`.* The file holds rows from all three
 sources. When it does not exist yet (the first run), each source's rows are
 written directly. On later runs, each source's old rows are filtered out and
-its new rows are appended. The rows, schema and order are identical; we
-checked this with `pyarrow` `Table.equals`. Only the byte-level Parquet
-encoding differs between the two write paths. Both encodings are
-deterministic.
+its new rows are appended. In the last run we checked with `pyarrow`
+`Table.equals` that both write paths give the same rows, schema and order;
+only the byte-level Parquet encoding differs, so the file hash is not used as
+the rerun check. Both encodings are deterministic.
 
 **Run records.**
 
@@ -606,7 +611,7 @@ deterministic.
 
 ## 12. Tests
 
-`make test` runs 177 tests (all passing). For testing the gold stage, the database tests use a
+`make test` runs 223 tests (all passing). For testing the gold stage, the database tests use a
 throwaway schema, not touching the real `gold` schema.
 
 | Area | Test files | Covers |

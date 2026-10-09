@@ -43,7 +43,7 @@ first stage that fails:
 
 A full run takes under a minute. Running it twice on unchanged input gives
 identical Silver/ML files and identical Gold rows. Silver and ML live in the
-MinIO bucket (`http://localhost:9001`), not in this folder.
+MinIO bucket (`http://localhost:9001`); a copy from the final run is in `lake/`.
 
 Source layout:
 

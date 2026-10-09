@@ -1,5 +1,5 @@
 {
-  "code_revision": "595ca26e6e58378d86e58758543a046d0327abf3",
+  "code_revision": "064c97de594bc6bbdfbaecba048a38da1e8421e7",
   "data_release": "quantum-data-core v3 (2026-08-05)",
   "dependencies": {
     "numpy": "2.5.3",
@@ -8,7 +8,7 @@
     "scikit-learn": "1.9.0",
     "scipy": "1.18.1"
   },
-  "finished_at": "2026-10-06T19:13:55.540531+00:00",
+  "finished_at": "2026-10-09T08:55:36.526257+00:00",
   "input_hashes": {
     "ml/ml_google_decoder_example.parquet": "73ddcd005cd1c71df2acccd4799f0b7007593c9c6b313d5181a5e5fa7e7b24a9",
     "ml/ml_syndrome_decoder_example.parquet": "bc89a69b34a49e33d3e903cf48f0faa26c286c343bb09376cc787104e2ec56bf"
@@ -23,8 +23,8 @@
     "models/task_c_raw_detector_mlp.pkl": "46dae21fdc6b0e82b3dc82b4df3e90afa3f291542199fee1355ef7c5680b92c3"
   },
   "random_seed": 4000,
-  "run_id": "e48012b3-b01c-414f-af6f-bf7ead861ad7",
-  "started_at": "2026-10-06T19:13:45.727794+00:00",
+  "run_id": "82a0cec5-27a4-485c-94b1-1f298778a2b9",
+  "started_at": "2026-10-09T08:55:26.613441+00:00",
   "task_a_syndrome": {
     "feature_helper": "quantum_lake_student.ml.syndrome_model_input",
     "feature_order": [
@@ -102,12 +102,12 @@
     },
     "timings_seconds": {
       "task_a_weighted_logistic_regression": {
-        "prediction_seconds": 0.00021445902530103922,
-        "training_seconds": 0.0813606670126319
+        "prediction_seconds": 0.00021829199977219105,
+        "training_seconds": 0.11521070898743346
       },
       "task_a_weighted_prior": {
-        "prediction_seconds": 0.00022954202722758055,
-        "training_seconds": 0.0034497920132707804
+        "prediction_seconds": 0.00018041697330772877,
+        "training_seconds": 0.003846541978418827
       }
     },
     "weights": "sample_weight used in fitting both models and in every metric"
