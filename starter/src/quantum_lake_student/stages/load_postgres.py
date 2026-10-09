@@ -39,22 +39,19 @@ Load is all-or-nothing (rollback on any failure), and idempotent (rerun replaces
 '''
 
 # ---------------------------------------------------------------------------
-# Shared QEC vocabulary
-#
-# The three sources share QEC concepts but no row-level identifier
-# (assignment/faq.md: "Use clear shared names without inventing a match").
-# So Gold conforms names instead of joining rows: every source's
-# experiment/circuit table carries the same two columns, with the same name,
-# type and allowed values:
-#   code_family  'surface_code' or 'repetition_code'
-#   distance     code distance (positive integer)
-# They are labels, never join keys: no foreign key connects two sources.
-# Full list of conformed terms: reports/gold_stage/gold_shared_vocabulary.md
+"""
+Shared QEC vocabulary
+
+ The three sources share QEC concepts but no row-level identifier (assignment/faq.md: "Use clear shared names without inventing a match").
+ So Gold conforms names instead of joining rows: every source's experiment/circuit table carries the same two columns, with the same name,
+ type and allowed values:
+   code_family  'surface_code' or 'repetition_code'
+   distance     code distance (positive integer)
+ They are labels, never join keys: no foreign key connects two sources.
+ Full list of conformed terms: reports/gold_stage/gold_shared_vocabulary.md
+"""
 # ---------------------------------------------------------------------------
 
-# Every google_qec properties.yml says `type: surface_code_memory_experiment`
-# (and every experiment directory is named surface_code_...), so the whole
-# source is one code family; distance comes per experiment from Silver.
 GOOGLE_CODE_FAMILY = "surface_code"
 
 # DECODER_NAMES: the four decoders supplied for google_qec. Pulled out as a module-level constant so both the schema design and the load logic agree on the same four names
@@ -280,13 +277,11 @@ def load_google_gold(conn, settings) -> tuple[int, int, int, str, str]: #this fu
 
 SYNDROMES_SOURCE_NAME = "qec_syndromes"
 
-# The source documents these files as simulated distance-3 surface-code
-# syndromes (assignment/data-sources.md); the filenames only encode distance,
+# The source documents these files as simulated distance-3 surface-code syndromes (assignment/data-sources.md); the filenames only encode distance,
 # so the family is a source-level constant (see "Shared QEC vocabulary" above).
 SYNDROMES_CODE_FAMILY = "surface_code"
 
-# gold_syndrome_experiment table with one row per fault-rate file,
-# with checks that the rate is a probability (between 0 and 1) and rounds and checks both equal 4.
+# gold_syndrome_experiment table with one row per fault-rate file, with checks that the rate is a probability (between 0 and 1) and rounds and checks both equal 4.
 # code_family/distance are the shared-vocabulary columns every source carries.
 SYNDROME_EXPERIMENT_DDL = """
 CREATE TABLE IF NOT EXISTS gold_syndrome_experiment (
@@ -301,10 +296,9 @@ COMMENT ON TABLE gold_syndrome_experiment IS
     'One row represents one simulated physical-fault-rate experiment (one source CSV file).';
 """
 
-# gold_syndrome_pattern: one row per distinct 16-bit pattern, plus how many of its
-# 16 checks actually fired. The CHECK is a DB-level guarantee that a pattern is
+# gold_syndrome_pattern: one row per distinct 16-bit pattern, plus how many of its 16 checks actually fired. The CHECK is a DB-level guarantee that a pattern is
 # really 16 bytes and each byte is 0 or 1 (hex "00" or "01"), on top of what
-# Silver already validated.
+
 SYNDROME_PATTERN_DDL = """
 CREATE TABLE IF NOT EXISTS gold_syndrome_pattern (
     syndrome_bits          BYTEA PRIMARY KEY CHECK (encode(syndrome_bits, 'hex') ~ '^(0[01]){16}$'), -- 16 one-byte 0/1 values, round first then check (4 rounds x 4 checks)
@@ -314,10 +308,7 @@ COMMENT ON TABLE gold_syndrome_pattern IS
     'One row represents one distinct 16-bit syndrome pattern, seen in any experiment.';
 """
 
-# main table, one row per (experiment, pattern, label) combination, points at both
-# parent tables via a foreign key, stores the quantity and label, and source_record_id for tracing
-# indexes added for quicker queries. UNIQUE(source_record_id) guarantees every
-# Gold row traces back to exactly one Silver row, never shared.
+
 SYNDROME_OBSERVATION_DDL = """
 CREATE TABLE IF NOT EXISTS gold_syndrome_observation (
     observation_id       TEXT PRIMARY KEY, -- deterministic hash of (experiment_id, syndrome_bits, label), stable across runs
@@ -442,19 +433,16 @@ def load_syndrome_tables(cursor, silver_table) -> None:
 # ---------------------------------------------------------------------------
 
 QASMBENCH_SOURCE_NAME = "qasmbench"
+"""
+Silver stores register_declarations as a JSON blob; Gold splits it into one typed row per register so it can be queried and constrained properly.
 
-# Silver stores register_declarations as a JSON blob; Gold splits it into
-# one typed row per register so it can be queried and constrained properly.
+data_qubits is kept as a TEXT[] column rather than a junction table -
+there are only ~8 (qubit, check) pairs in the whole archive, so a separate table would add overhead for no real gain. We use cardinality() in the
+CHECK (not array_length) because array_length returns NULL for empty arrays, which would silently pass the constraint.
 
-# data_qubits is kept as a TEXT[] column rather than a junction table -
-# there are only ~8 (qubit, check) pairs in the whole archive, so a separate
-# table would add overhead for no real gain. We use cardinality() in the
-# CHECK (not array_length) because array_length returns NULL for empty arrays,
-# which would silently pass the constraint.
-
-# Only circuits with an explicit parity-check structure get a code_family/distance label.
-# qec_sm_n5 is a distance-3 repetition code (3 data qubits, 2 parity checks).
-# The other two benchmarks have no explicit structure, so they stay NULL.
+Only circuits with an explicit parity-check structure get a code_family/distance label.
+ qec_sm_n5 is a distance-3 repetition code (3 data qubits, 2 parity checks). The other two benchmarks have no explicit structure, so they stay NULL.
+"""
 QASMBENCH_CODE_LABELS = {
     "qec_sm_n5": ("repetition_code", 3),
 }
@@ -701,6 +689,7 @@ def _load_qasmbench(conn, settings) -> dict:
 
 # Every source's Gold tables live in one dedicated schema (team agreement), not in
 # the default "public" schema. Tests point this at a throwaway schema instead.
+
 GOLD_SCHEMA = "gold"
 
 # One row per experiment (google_qec, qec_syndromes) or circuit variant
@@ -727,26 +716,7 @@ COMMENT ON VIEW v_qec_experiment_catalog IS
     'One row represents one experiment (google_qec, qec_syndromes) or circuit variant (qasmbench), listed in the shared QEC vocabulary; sources are stacked, never joined.';
 """
 
-# Gold-to-ML views (assignment/required-ml-tables.md): every identifier,
-# feature, label and weight of the two ML tables comes from these views over
-# Gold. build_ml_tables.py only selects from them, adds data_split with the
-# course helpers, checks the contracts and writes Parquet. Each view is also
-# the relation that resolves an ML example_id back to its Gold record(s).
-#
-# v_ml_syndrome_decoder_example: example_id is gold_syndrome_observation's own
-# primary key, already a repeatable hash of (experiment, syndrome, label),
-# which is exactly what the contract asks for, so it resolves to one Gold row.
-#
-# v_ml_google_decoder_example: example_id is a repeatable hash of
-# (experiment, shot), resolving to gold_google_shot's primary key
-# (experiment_id, shot_index). The four decoder rows per shot in
-# gold_google_decoder_prediction are pivoted back into the contract's four
-# *_prediction columns; bool_or over the single matching row is only there
-# because an aggregate is needed after GROUP BY. A missing decoder row gives
-# NULL, which the export's contract check rejects.
-#
-# ORDER BY keeps row order, and so the Parquet bytes and hashes, identical
-# across reruns on unchanged Gold.
+
 ML_VIEWS_SQL = """
 CREATE OR REPLACE VIEW v_ml_syndrome_decoder_example AS
 SELECT
@@ -860,8 +830,7 @@ def _load_syndromes(conn, settings) -> dict:
         cursor.execute("SELECT COUNT(*) FROM gold_syndrome_observation")
         observation_count = cursor.fetchone()[0]
         cursor.execute("SELECT COALESCE(SUM(quantity), 0) FROM gold_syndrome_observation")
-        # SUM(quantity) over a BIGINT column comes back as NUMERIC (Decimal
-        # in Python), not int -- json.dumps can't serialize Decimal.
+        # SUM(quantity) over a BIGINT column comes back as NUMERIC (Decimal in Python), not int -- json.dumps can't serialize Decimal.
         gold_quantity_total = int(cursor.fetchone()[0])
         cursor.execute(
             "SELECT experiment_id, COALESCE(SUM(quantity), 0) FROM gold_syndrome_observation GROUP BY experiment_id"
@@ -870,8 +839,7 @@ def _load_syndromes(conn, settings) -> dict:
             experiment_id: int(total) for experiment_id, total in cursor.fetchall()
         }
 
-        # every Silver row (and its quantity weight) must arrive in Gold exactly
-        # once. Raising here, before the commit, rolls the whole load back, so
+        # every Silver row (and its quantity weight) must arrive in Gold exactly once. Raising here, before the commit, rolls the whole load back, so
         # a load that lost or duplicated rows never replaces the previous Gold data
         rows_match = observation_count == syndromes_table.num_rows
         quantity_match = gold_quantity_by_experiment == silver_quantity_by_experiment
